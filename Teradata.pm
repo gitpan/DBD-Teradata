@@ -2418,7 +2418,7 @@ sub clear_buf {
 package DBD::Teradata;
 
 use vars qw($VERSION $err $errstr $state $drh %connections);
-$VERSION = "1.11";
+$VERSION = "1.12";
 $drh = undef;
 %connections = ();
 $err = 0;
@@ -3735,6 +3735,17 @@ sub ProcDataInfo {	# processes DATAINFO parcels on the fly
 
 	my $i = 0;	
 	for ($i = 0; $i < $flds; $i++) {
+#
+#	funny little 'feature': everything after the first descriptor
+#	is always in Intel format, so we need to swap bytes if things
+#	look funny here..
+#
+		if ($diflds[$i * 2] > 900) {
+			my $t = $diflds[$i*2];
+			$diflds[$i*2] = (($t & 0xFF)<<8) + ($t>>8);
+			$t = $diflds[($i*2) + 1];
+			$diflds[($i*2) + 1] = (($t & 0xFF)<<8) + ($t>>8);
+		}
 		if (!defined($ptypemap{($diflds[($i * 2)] & $tdat_NULL_MASK)})) {
 			last;
 		}
@@ -3869,6 +3880,10 @@ http://home.earthlink.net/~darnold/tdatdbd.html for detailed information.
     	tdatdbd.html - the User's Guide
     	
 =head2 *** CHANGE HISTORY
+
+	Release 1.12	Dec 10, 2000
+	
+		- fixed datainfo problem on non-Intel platforms
 
 	Release 1.11	Dec 10, 2000
 	

@@ -97,7 +97,7 @@ my %typestr = (
 	SQL_TIME, 'TIME'
 	);
 
-	my $ctldbh = DBI->connect("dbi:Teradata:dbc", 'dbc', 'dbc',
+	my $ctldbh = DBI->connect("dbi:Teradata:jhvh1", 'dbc', 'dbc',
 		{
 			PrintError => 0,
 			RaiseError => 0,

@@ -1,5 +1,8 @@
 Revision history for Perl extension DBD::Teradata.
 
+1.12	Mon Dec 10  12:00:00 2000
+	- fixed datainfo problem on non-Intel platforms
+
 1.11	Sun Nov 19  12:00:00 2000
 	- removed deprecated/unneeded defined(@fname)
 
