@@ -6,6 +6,7 @@
 #   with the exception that it cannot be placed on a CD-ROM or similar media
 #   for commercial distribution without the prior approval of the author.
 #
+#
 require 5.005;
 use strict;
 use DBI;
@@ -16,6 +17,8 @@ use IO::Socket;
 package DBD::Teradata::impl;
 
 use Socket;
+
+
 #
 #	define lots of symbols for our various protocol constants
 #
@@ -273,7 +276,6 @@ my $PclCURSORHOST   = 120;
 my $PclCURSORDBC    = 121;   
 my $PclFLAGGER      = 122;
 
-my $MaxRESPSz = 32100;
 #
 #	Activity type codes
 #
@@ -438,7 +440,6 @@ my %ptypemap = (
 	760, DBI::SQL_TIMESTAMP,
 	764, DBI::SQL_TIME
 	);
-
 #
 #	maps max sizes to type codes
 #
@@ -460,6 +461,12 @@ my $BADID      = 313; # bad indentifier field in logon string
 my $SESSCRASHED  = 315; # session has crashed          
 
 my $REQOVFLOW  = 350; # Request size exceeds maximum.              
+
+#
+#	begin volatile variable definitions;
+#	these need thread mutexes for safety
+#
+my $MaxRESPSz = 32100;
 
 #
 #	stmt ctxts contain:
@@ -487,24 +494,13 @@ my %sesstate;	# current state of session:
 my %sesauth;	# LS bytes of authenticator for sessno
 my %sesauthx;	# MSB of authenticator for sessno
 my %sesinxact;	# 1 => session in active transaction
-my %curreq;	# current reqno for sessno
+my %curreq;		# current reqno for sessno
 my %curresp;	# current response buffer from DBMS
 my %lasterr;	# last err code for sessno
 my %lastemsg;	# last error msg for sessno
-
-reset %sesmap;	# maps sockets to sessno's
-reset %sesfns;
-reset %sesstate;	# session state
-reset %sesinxact;
-reset %sesauth;	# LS bytes of authenticator for sessno
-reset %sesauthx;	# MSB of authenticator for sessno
-reset %curreq;	# current reqno for sessno
-reset %curresp;
-reset %lasterr;	# last err code for sessno
-reset %lastemsg;	# last error msg for sessno
-
-$curreq{0} = 0;
-$sesauthx{0} = 0;
+my %seslsn;		# LSN of the session
+my %sespart;	# partition of session
+my %sesbuff;	# deferred execution buffer
 
 #
 # we can make an educated guess at platform; we'll need a config file or
@@ -514,12 +510,17 @@ my $platform;
 my $hostchars;
 my $phdfltsz = 16;
 my $reqfrags = 0;
-my $rspfrags = 0;
-my $nosocks = 0;
 my $no2bufs = 1;
 my $debug = 0;
 
+#
+#	make this thread safe so only first thread actually effects
+#	the global operating params
+#
 sub init {	# init platform characteristics
+	$curreq{0} = 0;
+	$sesauthx{0} = 0;
+
 	$platform = $ENV{'TDAT_PLATFORM_CODE'};
 	$hostchars = $tdat_ASCII;
 	if (ord('A') != 65) {
@@ -548,12 +549,6 @@ sub init {	# init platform characteristics
 	$reqfrags = $ENV{'TDAT_REQ_FRAG'};
 	if (!defined($reqfrags)) { $reqfrags = 0; }
 
-	$rspfrags = $ENV{'TDAT_RSP_FRAG'};
-	if (!defined($rspfrags)) { $rspfrags = 0; }
-
-	$nosocks = $ENV{'TDAT_NOSOCKS'};
-	if (!defined($nosocks)) { $nosocks = 0; }
-
 	$no2bufs = $ENV{'TDAT_NO2BUFS'};
 	if (!defined($no2bufs)) { $no2bufs = 1; }
 
@@ -562,10 +557,14 @@ sub init {	# init platform characteristics
 
 	DBI->trace_msg("DBD::Teradata init: platform = $platform, debug = $debug,\n" .
 		"charset = $hostchars, ph size = $phdfltsz, request fragment = $reqfrags\n" .
-		"response fragment = $rspfrags no sockets = $nosocks no dbl buf = $no2bufs\n", 1);
+		"response no dbl buf = $no2bufs\n", 1);
 	return 1;
 }
 
+#
+#	mutex here to protect the cleanup of the
+#	ctxt hashes
+#
 sub cleanup {	# sessno
 	my $sessno = pop(@_);
 
@@ -576,6 +575,8 @@ sub cleanup {	# sessno
 	undef $curresp{$sessno};
 	undef $sesauth{$sessno};
 	undef $sesauthx{$sessno};
+	undef $seslsn{$sessno};
+	undef $sespart{$sessno};
 	1;
 }
 #
@@ -624,19 +625,6 @@ sub tdsend { # sessno, msg
 	my ($connfd, $msg, $dummy) = @_;
 	my $n = 0;
 	if ($debug) { DBI->trace_msg("Sending request\n", 2); }
-	if ($nosocks == 1) {
-		$n = syswrite($connfd, $msg, length($msg));
-		if (!defined($n)) { 
-			DBI->trace_msg("Can't syswrite: $!\n", 1);
-			return undef; 
-		}
-		if ($n != length($msg)) { 
-			DBI->trace_msg("Only syswrote $n bytes!\n", 1);
-			return undef;
-		}
-		if ($debug) { DBI->trace_msg("Request sent\n", 2); }
-		return length($msg);
-	}
 
 	if ($reqfrags == 0) {
 		$n = send($connfd, $msg, 0);
@@ -684,118 +672,13 @@ sub gettdresp {	# sessno, returns buffer
 	my($connfd, $sessno) = @_;
 	my $rspmsg = '';
 	my $hdrlen = 52;
-	my $rsplen = ($rspfrags == 0) ? 32000 : 52;
+	my $rsplen = $MaxRESPSz + 100;
 	my $hdr = '';
 #
 #	get fixed part first
 #
 	if ($debug) { DBI->trace_msg("Rcving Header\n", 2); }
-	if ($nosocks == 1) {
-		my $n;
-		while ($hdrlen > 0) {
-			$n = sysread($connfd, $rspmsg, $hdrlen);
-			if (!defined($n)) {
-				$hdrlen = length($rspmsg);
-				DBI->trace_msg("System error: can\'t sysread msg header: $!;\n rcvd $hdrlen bytes.\n", 1);
-				$lasterr{$sessno} = 1199;
-				$lastemsg{$sessno} = "System error: can\'t recv msg header; closing connection.";
-				close($connfd);
-				return '';
-			}
-			if ($n == 0) {
-				$hdrlen = length($rspmsg);
-				DBI->trace_msg("System error: EOF on connection during msg header sysread; rcvd $hdrlen bytes.\n", 2);
-				$lasterr{$sessno} = 1199;
-				$lastemsg{$sessno} = "System error: EOF on connection; closing connection.";
-				close($connfd);
-				return '';
-			}
-			$hdrlen -= length($rspmsg);
-			$hdr .= $rspmsg;
-			$rspmsg = '';
-		}
-		if ($debug) { DBI->trace_msg(hexdump('Rsp COPReq header', $hdr), 2); }
-		my ($tdver, $tdclass, $tdkind, $tdenc, $tdchksum, $tdbytevar, 
-			$tdwordvar, $tdmsglen) = unpack("C6Sn", $hdr);
-		if ($tdmsglen < 0) { $tdmsglen += 65536; }	# to handle large resp msgs
-		if (($tdver !=  3) || ($tdclass !=  2)) {
-			DBI->trace_msg("Invalid response message header; closing connection.", 2);
-			$lasterr{$sessno} = 1200;
-			$lastemsg{$sessno} = "Invalid response message header; closing connection.";
-			close($sesmap{$sessno});
-			cleanup($sessno);
-			return '';
-		}
-#
-#	get the rest
-#
-		$rspmsg = '';
-		if (length($hdr) > 52) {
-			$tdmsglen -= (length($hdr) - 52);
-		}
-		$rspmsg = substr($hdr, 20);
-		my $tmsg;
-		while ($tdmsglen > 0) {
-			$n = sysread($connfd, $tmsg, $tdmsglen);
-			if (!defined($n)) {
-				$hdrlen = length($tmsg);
-				DBI->trace_msg("System error: can\'t sysread msg body $!;\n rcvd $hdrlen bytes.\n", 2);
-				$lasterr{$sessno} = 1199;
-				$lastemsg{$sessno} = "System error: can't sysread() msg body; closing connection.";
-				close($connfd);
-				return '';
-			}
-			if ($n == 0) {
-				$hdrlen = length($tmsg);
-				DBI->trace_msg("System error: EOF on connection during sysread of msg body;\n rcvd $hdrlen bytes.\n", 2);
-				$lasterr{$sessno} = 1199;
-				$lastemsg{$sessno} = "System error: EOF on connection; closing connection.";
-				close($connfd);
-				return '';
-			}
-			my $lrspmsg = length($tmsg);
-		
-			if ($lrspmsg < $tdmsglen) {
-				if ($debug) { DBI->trace_msg("GOT $lrspmsg BYTES, NEEDED $tdmsglen\n",2); }
-			}
-			$rspmsg .= $tmsg;
-			$tdmsglen -= $lrspmsg;
-			$tmsg = '';
-		}
-		if ($debug) { DBI->trace_msg(hexdump('Rsp COPSeg and body', $rspmsg), 2); }
-#
-#	in assign state, leave header intact
-#
-		if ($sessno == 0) { return $rspmsg; }
 
-		my ($tdsess, $tdauth1, $tdauth2, $reqno) = unpack("L LL L", $rspmsg);
-
-		if ($tdsess !=  $sessno) {
-			close($sesmap{$sessno});
-			cleanup($sessno);
-			$lasterr{$sessno} = 1201;
-			$lastemsg{$sessno} = "Message for unknown session $tdsess recv'd; closing connection.";
-			return '';
-		}
-#
-#	check for failure/error parcel
-#
-		$rspmsg = substr($rspmsg, 32);
-		if ($debug) { DBI->trace_msg(pcldump($rspmsg), 1); }
-		my ($tdflavor, $tdlen) = unpack("SS", $rspmsg);
-		if (($tdflavor == $PclFAILURE) || ($tdflavor == $PclERROR)) {
-			my ($tdstmt, $tdinfo, $tderr, $tdelen) = 
-				unpack("SSSS", substr($rspmsg, 4));
-			my $tdemsg = substr($rspmsg, 12, $tdelen);
-			DBI->trace_msg("ERROR\: $tdemsg\n", 2);
-			$lasterr{$sessno} = $tderr;
-			$lastemsg{$sessno} = $tdemsg;
-		}
-		return $rspmsg;
-	}
-#
-#	sockets method
-#
 	while ($hdrlen > 0) {
 		if (!recv($connfd, $rspmsg, $rsplen, 0)) {
 			if ((!defined($rspmsg)) || (length($rspmsg) == 0)) {
@@ -1038,8 +921,46 @@ sub tdcontinue {
 #	connect to the DBMS
 #
 sub connect {
-	my($dbsys, $port, $username, $password, $dbname) = @_;
-
+	my($dbsys, $port, $username, $password, $dbname, $lsn, $partition, $errcode, $errstr) = @_;
+#
+#	validate parms
+#
+	$$errcode = 0;
+	$$errstr = '';
+	if (!defined($partition)) {
+		$partition = 'DBC/SQL';
+	}
+	elsif (($partition ne 'DBC/SQL') && ($partition ne 'FASTLOAD') && 
+		($partition ne 'EXPORT') && ($partition ne 'MONITOR')) {
+		$$errcode = -1;
+		$$errstr = 'Invalid partition string.';
+		return undef;
+	}
+	if (($partition ne 'DBC/SQL') && ($partition ne 'MONITOR') && 
+		((!defined($$lsn)) || ($$lsn == 0))) {
+		$$errcode = -1;
+		$$errstr = 'LSN required for utility sessions.';
+		return undef;
+	}
+#
+#	make sure the LSN is already alloc'd
+#
+	if ((defined($$lsn)) && ($$lsn != 0)) {
+		my $lsnok = 0;
+		foreach my $i (keys(%sesmap)) {
+			if (($sespart{$i} eq 'DBC/SQL') && 
+				($seslsn{$i} == $$lsn)) {
+				$lsnok = 1;
+				last;
+			}
+		}
+		if (!$lsnok) {
+			$$errcode = -1;
+			$$errstr = 'Specified LSN not previously allocated.';
+			return undef;
+		}
+	}
+	
 	my $reqlen = 4 + 32 + 4;
 	my $authent = int(rand(time()));
 	my $reqmsg = buildtdhdr($COPKINDASSIGN, $reqlen, 0, $authent);
@@ -1051,26 +972,42 @@ sub connect {
 		$PclCONFIG, 4);
 
 	my $connfd = newsocket();
-	if (!defined($connfd)) { return undef; }
-
-	my $dest = sockaddr_in($port, inet_aton($dbsys)) 
-		|| (close($connfd) && return undef);
-	connect($connfd, $dest) || (close($connfd) && return undef);
-	setsockopt($connfd, SOL_SOCKET, SO_KEEPALIVE, pack("l", 1)) || 
-		warn "Can't set SO_KEEPALIVE: $!\n";
-	if ($debug) { DBI->trace_msg(hexdump('Request Msg', $reqmsg), 2); }
-	if ($nosocks == 1) {
-		my $currfd = select;
-		binmode $connfd;	# use binary mode
-		select $connfd;	# force flush on write
-		$| = 1;
-		select $currfd;	# force flush on write
+	if (!defined($connfd)) { 
+		$$errcode = -1;
+		$$errstr = "Unable to allocate a socket.";
+		return undef; 
 	}
 
-	tdsend($connfd, $reqmsg, 0) || (close($connfd) && return undef);
+	my $dest = sockaddr_in($port, inet_aton($dbsys));
+	if (! $dest) {
+		$$errcode = -1;
+		$$errstr = "Unable to get host address.";
+		close($connfd);
+		return undef;
+	}
+	if (! connect($connfd, $dest)) {
+		$$errcode = -1;
+		$$errstr = "Unable to connect: $!";
+		close($connfd);
+		return undef;
+	}
+	setsockopt($connfd, SOL_SOCKET, SO_KEEPALIVE, pack("l", 1));
+#		warn "Can't set SO_KEEPALIVE: $!\n";
+	if ($debug) { DBI->trace_msg(hexdump('Request Msg', $reqmsg), 2); }
+	if (! tdsend($connfd, $reqmsg, 0)) {
+		$$errcode = -1;
+		$$errstr = "Send failed: $!";
+		close($connfd);
+		return undef;
+	}
 
 	my $rspmsg = gettdresp($connfd, 0);
-	if ($rspmsg eq '') { return undef; }
+	if ($rspmsg eq '') { 
+		$$errcode = -1;
+		$$errstr = "Recv failed: $!";
+		close($connfd);
+		return undef; 
+	}
 	my ($sessno, $tdauth1, $tdauth2, $reqno) = unpack("L LL L", $rspmsg);
 	if ($sessno == 0) {
 		$rspmsg = substr($rspmsg, 32);
@@ -1078,15 +1015,18 @@ sub connect {
 		if (($tdflavor == $PclFAILURE) || ($tdflavor == $PclERROR)) {
 			my ($tdstmt, $tdinfo, $tderr, $tdelen) = 
 				unpack("SSSS", substr($rspmsg, 4));
-			my $tdemsg = substr($rspmsg, 12, $tdelen);
-			DBI->trace_msg("ERROR\: $tdemsg\n", 2);
-			$lasterr{$sessno} = $tderr;
-			$lastemsg{$sessno} = $tdemsg;
+			$$errcode = $tderr;
+			$$errstr = substr($rspmsg, 12, $tdelen);
+			DBI->trace_msg("ERROR\: $$errstr\n", 2);
 		}
 		close($connfd);
 		undef $curreq{$sessno};
 		return undef;
 	}
+#
+#	should parse config info here so we can limit number of
+#	utility session to logon
+#
 	$sesfns{fileno($connfd)} = $sessno;
 	$rspmsg = substr($rspmsg, 32);
 	my ($tdflavor, $tdlen, $pbkey, $sesaddr, $pubkeyn, $relary, $verary, 
@@ -1095,14 +1035,17 @@ sub connect {
 	if (($tdflavor !=  $PclASSIGNRSP) || ($tdlen !=  98)) {
 		close($connfd);
 		undef $curreq{$sessno};
-		$lasterr{$sessno} = 1202;
-		$lastemsg{$sessno} = 
+		$$errcode = 1202;
+		$$errstr = 
 			"Unknown response parcel $tdflavor recv'd during ASSIGN; closing connection.";
 		return undef;
 	}
 
 	$sesauth{$sessno} = $authent+1;
 	$sesauthx{$sessno} = 0;
+	$sespart{$sessno} = $partition;
+	$seslsn{$sessno} = $$lsn;
+	$sesbuff{$sessno} = '';
 	if ($debug) { DBI->trace_msg("Session $sessno assigned for Rel $relary Vers $verary\n", 1); }
 #
 #	returned addr seems to be informational only!!!
@@ -1118,28 +1061,69 @@ sub connect {
 		'TNND',0,0,0,0,0,0,
 		
 		$PclCONNECT,
-		4+24,'DBC/SQL', 0,0,0,	# pclsize
+		4+24, $partition, 
+			(defined($$lsn) ? $$lsn : 0),
+			(defined($$lsn) ? (($$lsn == 0) ? 1 : 2) : 0),
+			0,
+		$PclDATA, length($lgnsrc)+4, $lgnsrc);
 		
-		$PclDATA, length($lgnsrc)+4, $lgnsrc); # PclDATA
 	$reqlen = length($conmsg);
-	$reqmsg = buildtdhdr($COPKINDCONNECT, $reqlen, $sessno, 
-		$sesauth{$sessno});
+	$reqmsg = buildtdhdr($COPKINDCONNECT, $reqlen, $sessno, $sesauth{$sessno});
 	$reqmsg .= $conmsg;
 	
 	if ($debug) { DBI->trace_msg(hexdump('Request Msg', $reqmsg), 2); }
-	tdsend($connfd, $reqmsg, 0) || (close($connfd) && return undef);
+	if (! tdsend($connfd, $reqmsg, 0)) {
+		close($connfd);
+		$$errcode = -1;
+		$$errstr = "Send failed: $!";
+		return undef;
+	}
 
 	$rspmsg = gettdresp($connfd,$sessno);
 	if ($rspmsg eq '') { return 0; }
 	($tdflavor, $tdlen, $pbkey, $sesaddr, $pubkeyn, $relary, $verary, 
 		$hostid)  = unpack("SSC8C32C32A6A14S", $rspmsg);
 
-	if (($tdflavor !=  $PclSUCCESS) || ($tdlen < 4)) {
+	if (($tdflavor == $PclFAILURE) || ($tdflavor == $PclERROR)) {
+		my ($tdstmt, $tdinfo, $tderr, $tdelen) = 
+			unpack("SSSS", substr($rspmsg, 4));
+		$$errcode = $tderr;
+		$$errstr = substr($rspmsg, 12, $tdelen);
+		DBI->trace_msg("ERROR\: $$errstr\n", 2);
 		close($connfd);
 		undef $curreq{$sessno};
 		undef $sesauth{$sessno};
 		undef $sesauthx{$sessno};
+		undef $sespart{$sessno};
+		undef $seslsn{$sessno};
 		return undef;
+	}
+	if ($tdflavor !=  $PclSUCCESS) {
+		close($connfd);
+		$$errcode = -1;
+		$$errstr = "Unexpected parcel $tdflavor.";
+		undef $curreq{$sessno};
+		undef $sesauth{$sessno};
+		undef $sesauthx{$sessno};
+		undef $sespart{$sessno};
+		undef $seslsn{$sessno};
+		return undef;
+	}
+
+	if (defined($$lsn) && ($$lsn == 0)) {
+		($tdflavor, $tdlen, $$lsn) = unpack("SSL", substr($rspmsg, $tdlen));
+		if ($tdflavor != $PclLSN) {
+			close($connfd);
+			$$errcode = -1;
+			$$errstr = "Expected LSN parcel but got $tdflavor.";
+			undef $curreq{$sessno};
+			undef $sesauth{$sessno};
+			undef $sesauthx{$sessno};
+			undef $sespart{$sessno};
+			undef $seslsn{$sessno};
+			return undef;
+		}
+		$seslsn{$sessno} = $$lsn;
 	}
 
 	if ($debug) { DBI->trace_msg("Session $sessno connected\n", 1); }
@@ -1379,63 +1363,6 @@ sub parse_using {	# sql string
 	}
 	return $typecnt;
 }
-
-sub quikprep {
-	my ($sessno, $dbreq, $datainfo) = @_;
-
-	my $reqlen = 4 + 10 + 4 + length($dbreq) + 6;
-	if ($datainfo ne '') { $reqlen += length($datainfo) + 4; }
-	my $reqmsg = buildtdhdr($COPKINDSTART, $reqlen, $sessno, 
-		$sesauth{$sessno});
-	if ($sesauth{$sessno} == 0xffffffff) { 
-		$sesauthx{$sessno}++; 
-		$sesauth{$sessno} = 0; 
-	}
-	else { $sesauth{$sessno}++; }
-
-	if ($datainfo ne '') {
-		$reqmsg .= pack("SSa10 SSa* SSA* SSS", 
-			$PclOPTIONS,
-			14,	# pclsize
-			'RP',	# Request/execute mode
-
-			$PclREQUEST,
-			4 + length($dbreq),	# pclsize
-			$dbreq,	# request
-
-			$PclDATAINFO,
-			4+length($datainfo),
-			$datainfo,
-
-			$PclRESP,
-			6,	# pclsize
-			$MaxRESPSz);	# max response size
-	}
-	else {
-		$reqmsg .= pack("SSa10 SSA* SSS", 
-			$PclOPTIONS,
-			14,	# pclsize
-			'RP',	# Request/execute mode
-
-			$PclREQUEST,
-			4 + length($dbreq),	# pclsize
-			$dbreq,	# request
-
-			$PclRESP,
-			6,	# pclsize
-			$MaxRESPSz);	# max response size
-	}
-	
-	if (!tdsend($sesmap{$sessno}, $reqmsg, 0)) {
-		$lasterr{$sessno} = 301;
-		$lastemsg{$sessno} = "System error: can't send() PREPARE request.";
-		return undef;
-	}
-
-	my $rspmsg = gettdresp($sesmap{$sessno}, $sessno);
-	if ($rspmsg eq '') { return undef; }
-	return $rspmsg;
-}
 #
 #	prepare a (possibly parameterized) statement
 #
@@ -1451,7 +1378,6 @@ sub prepare {
 #	\@fnullable - arrayref to recv nullability of columns
 #	\@ptypes - arrayref to recv types of SQL stmt parameters
 #	\@plens - arrayref to recv lengths of SQL stmt parameters
-#	\$packstr - ref to recv a Perl pack/unpack descriptor for returned rows
 #	\$usephs - ref to recv number of placeholders used
 #	\@acttype - arrayref to recv type of each stmt in request/MACRO
 #	\@actcount - arrayref to recv effected rows count of each stmt in request/MACRO
@@ -1466,10 +1392,30 @@ sub prepare {
 #		column descriptions in the @fname, @fprec, and @fscale arrays
 #	\@ftitle - arrayref to recv titles of returned columns
 #	\@fformat - arrayref to recv formats of returned columns
+#	$partition - the partition of the session
 #
 	my($sessno, $dbreq, $fname, $ftype, $fprec, $fscale, $fnullable, $ptypes, 
-		$plens, $packstr, $usephs, $acttype, $actcount, $actwarns,
-		$actstarts, $actends, $actsumstarts, $actsumends, $ftitle, $fformat) = @_;
+		$plens, $usephs, $acttype, $actcount, $actwarns,
+		$actstarts, $actends, $actsumstarts, $actsumends, $ftitle, $fformat,
+		$partition) = @_;
+#
+#	empty statements on non-SQL partitions are assumed
+#	to indicate raw mode input applied to utilities
+#	
+	if (($partition eq 'FASTLOAD') && ($dbreq=~/^\s*;\s*$/)) {
+		$$usephs = 0;
+		$$ptypes[0] = DBI::SQL_VARBINARY;
+		$$plens[0] = 32000;
+		return 1;
+	}
+	if ($partition eq 'EXPORT') { 
+		$$usephs = 0; 
+		$$ptypes[0] = DBI::SQL_INTEGER;
+		$$plens[0] = 4;
+		$$ptypes[1] = DBI::SQL_INTEGER;
+		$$plens[1] = 4;
+		return 2;
+	}
 #
 #	count the number of placeholders
 #
@@ -1489,6 +1435,11 @@ sub prepare {
 	my $datainfo = '';
 	$$usephs = ($tmpreq =~ tr/\?//);
 	if ($$usephs !=  0) {
+		if (($partition ne 'DBC/SQL') || defined($seslsn{$sessno})) {
+			$lasterr{$sessno} = -1020;
+			$lastemsg{$sessno} = 'Failure -1020: Placeholders not supported for utility applications.';
+			return undef;
+		}
 #
 #	OK, we've got placeholders, but we don't have any
 #	way of getting the bound parameter types...so just
@@ -1511,12 +1462,12 @@ sub prepare {
 	my $usingvars = parse_using($tmpreq, $ptypes, $plens);
 	if ($usingvars == -1) {	# invalid USING clause
 		$lasterr{$sessno} = 500;
-		$lastemsg{$sessno} = "Invalid USING clause.";
+		$lastemsg{$sessno} = "Failure 500: Invalid USING clause.";
 		return undef; 
 	}
 	if (($$usephs > 0) && ($usingvars > 0)) {  # can't mix the two
 		$lasterr{$sessno} = 501;
-		$lastemsg{$sessno} = "Can't mix USING clause and placeholders in same statement.";
+		$lastemsg{$sessno} = "Failure 501: Can't mix USING clause and placeholders in same statement.";
 		return undef; 
 	}
 	
@@ -1691,7 +1642,7 @@ sub prepare {
 					$$fname[$nextcol] = $cname;
 				}
 				$$ftype[$nextcol] = $ptypemap{$datatype & $tdat_NULL_MASK};
-				$$fnullable[$nextcol] = $datatype & $tdat_NULL_MASK;
+				$$fnullable[$nextcol] = $datatype & 1;
 				$$ftitle[$nextcol] = $ctitle;
 #
 #	format specifiers seem to be specified in a somewhat
@@ -1754,89 +1705,11 @@ sub prepare {
 	else { return $$usephs; }
 }
 #
-#	simple execution
-#
-sub quikexec {
-	my ($sessno, $stmt, $datainfo, $indicdata) = @_;
-	$lasterr{$sessno} = 0;
-	$lastemsg{$sessno} = '';
-	my $reqmsg = '';
-
-	if ($indicdata ne '') {
-		if ($datainfo ne '') {
-			$reqmsg = pack("SSa10 SSA* SSa* SSa* SSS", 
-				$PclOPTIONS,
-				14,	# pclsize
-				'IE',	# Request/execute mode
-
-				$PclINDICREQ,
-				4 + length($stmt),	# pclsize
-				$stmt,	# request
-
-				$PclDATAINFO,
-				length($datainfo) + 4,
-				$datainfo,
-
-				$PclINDICDATA,
-				length($indicdata) + 4,
-				$indicdata,
-
-				$PclRESP,
-				6,	# pclsize
-				$MaxRESPSz);	# max response size
-		}
-		else {
-			$reqmsg = pack("SSa10 SSA* SSa* SSS", 
-				$PclOPTIONS,
-				14,	# pclsize
-				'IE',	# Request/execute mode
-
-				$PclINDICREQ,
-				4 + length($stmt),	# pclsize
-				$stmt,	# request
-
-				$PclINDICDATA,
-				length($indicdata) + 4,
-				$indicdata,
-
-				$PclRESP,
-				6,	# pclsize
-				$MaxRESPSz);	# max response size	
-		}
-	}
-	else {
-		$reqmsg = pack("SSa10 SSA* SSS", 
-			$PclOPTIONS,
-			14,	# pclsize
-			'IE',	# Request/execute mode
-
-			$PclINDICREQ,
-			4 + length($stmt),	# pclsize
-			$stmt,	# request
-
-			$PclRESP,
-			6,	# pclsize
-			$MaxRESPSz);	# max response size
-	}
-	my $reqlen = length($reqmsg);
-	$reqmsg = buildtdhdr($COPKINDSTART, $reqlen, $sessno, $sesauth{$sessno})
-		. $reqmsg;
-	if ($sesauth{$sessno} == 0xffffffff) { 
-		$sesauthx{$sessno}++; 
-		$sesauth{$sessno} = 0; 
-	}
-	else { $sesauth{$sessno}++; }
-	tdsend($sesmap{$sessno}, $reqmsg, 0) || return undef;
-	my $rspmsg = gettdresp($sesmap{$sessno}, $sessno);
-	if ($rspmsg eq '') { return undef; }
-	return $rspmsg;
-}
-#
 #	execute a previously prepared stmt, using current bound params
 #
 sub execute {
 	my ($sessno, $stmt, $datainfo, $indicdata, $nowait, 
-		$stmtinfo, $stmtno, $rawmode) = @_;
+		$stmtinfo, $stmtno, $rawmode, $keepresp, $sth) = @_;
 	$lasterr{$sessno} = 0;
 	$lastemsg{$sessno} = '';
 	my $reqmsg = '';
@@ -1844,7 +1717,40 @@ sub execute {
 	if (defined($rawmode) && ($rawmode eq 'RecordMode')) {
 		$modepcl = $PclDATA;
 	}
-	if ($indicdata ne '') {
+	if ($sespart{$sessno} eq 'FASTLOAD') {	# must be a fastload
+		$reqmsg = $sesbuff{$sessno} . pack("SSS", $PclRESP, 6, 512);
+		$sesbuff{$sessno} = '';
+	}
+	elsif ($sespart{$sessno} eq 'EXPORT') {	# must be an EXPORT
+		$reqmsg = pack('SSa* SSS', $PclREQUEST, 12, substr($stmt, 0, 8), $PclRESP, 6, $MaxRESPSz);
+	}
+	elsif ($sespart{$sessno} eq 'MONITOR') {	# must be a MONITOR
+		if ($indicdata ne '') {
+			$reqmsg = pack("SSA* SSa* SSS", 
+				$PclINDICREQ,
+				4 + length($stmt),	# pclsize
+				$stmt,	# request
+
+				$modepcl,
+				length($indicdata) + 4,
+				$indicdata,
+
+				(($keepresp) ? $PclKEEPRESP : $PclRESP),
+				6,	# pclsize
+				$MaxRESPSz);	# max response size	
+		}
+		else {
+			$reqmsg = pack("SSA* SSS", 
+				$PclINDICREQ,
+				4 + length($stmt),	# pclsize
+				$stmt,	# request
+
+				(($keepresp) ? $PclKEEPRESP : $PclRESP),
+				6,	# pclsize
+				$MaxRESPSz);	# max response size
+		}
+	}
+	elsif ($indicdata ne '') {
 		if ($datainfo ne '') {
 			$reqmsg = pack("SSa10 SSA* SSa* SSa* SSS", 
 				$PclOPTIONS,
@@ -1863,7 +1769,7 @@ sub execute {
 				length($indicdata) + 4,
 				$indicdata,
 
-				$PclRESP,
+				(($keepresp) ? $PclKEEPRESP : $PclRESP),
 				6,	# pclsize
 				$MaxRESPSz);	# max response size
 		}
@@ -1881,7 +1787,7 @@ sub execute {
 				length($indicdata) + 4,
 				$indicdata,
 
-				$PclRESP,
+				(($keepresp) ? $PclKEEPRESP : $PclRESP),
 				6,	# pclsize
 				$MaxRESPSz);	# max response size	
 		}
@@ -1896,7 +1802,7 @@ sub execute {
 			4 + length($stmt),	# pclsize
 			$stmt,	# request
 
-			$PclRESP,
+			(($keepresp) ? $PclKEEPRESP : $PclRESP),
 			6,	# pclsize
 			$MaxRESPSz);	# max response size
 	}
@@ -1994,7 +1900,12 @@ sub execute {
 			undef $$stmthash{'SummaryPosition'};
 			undef $$stmthash{'SummaryPosStart'};
 		}
-		elsif (($tdflavor != $PclDATAINFO) &&
+		elsif (($tdflavor == $PclDATAINFO) && 
+			($sespart{$sessno} eq 'MONITOR') && ($tdlen > 4)) {
+			DBD::Teradata::st::ProcDataInfo($sth, 
+				substr($rspmsg, 4, $tdlen - 4), $$stmtno);
+		}
+		elsif (($tdflavor != $PclDATAINFO) && 
 			($tdflavor !=  $PclPOSEND)) {
 			$lasterr{$sessno} = $BADPARCEL;
 			$lastemsg{$sessno} = "Received bad parcel $tdflavor.";
@@ -2020,18 +1931,20 @@ sub execute {
 #	fetch a single row
 #
 sub fetch { # sessno
-	my ($sessno, $nowait, $stmtinfo, $currstmt) = @_;
+	my ($sessno, $nowait, $stmtinfo, $currstmt, $ary, $maxlen, $retstr, $sth) = @_;
 	if (!defined($curresp{$sessno})) { 
 		return undef; 
 	}
 	$lasterr{$sessno} = 0;
 	$lastemsg{$sessno} = '';
 
+	if (!defined($maxlen)) { $maxlen = 1; }
+	$$retstr = '';
 	my $stmtno = $$currstmt;
 	my $rspmsg = $curresp{$sessno};
 	if ($rspmsg eq '') { 
 		$curresp{$sessno} = tdcontinue($sessno, $nowait);
-		if (!defined($curresp{$sessno})) { return ''; }
+		if (!defined($curresp{$sessno})) { return 0; }
 		if ($nowait != 0) { return -1; }
 		$rspmsg = $curresp{$sessno};
 	}
@@ -2046,7 +1959,7 @@ sub fetch { # sessno
 		if ($tdflavor == $PclENDREQUEST) {
 			$sesstate{$sessno} = 0;	# we're idle now
 			undef $curresp{$sessno};
-			return '';	# if we get here, then no data-returning stmts included
+			return 0;	# if we get here, then no data-returning stmts included
 		}
 		if (($tdflavor == $PclFAILURE) || ($tdflavor == $PclERROR)) {
 #
@@ -2110,6 +2023,11 @@ sub fetch { # sessno
 			undef $$stmthash{'SummaryPosStart'};
 			undef $$stmthash{'SummaryPosition'};
 		}
+		elsif (($tdflavor == $PclDATAINFO) && 
+			($sespart{$sessno} eq 'MONITOR') && ($tdlen > 4)) {
+			DBD::Teradata::st::ProcDataInfo($sth, 
+				substr($rspmsg, 4, $tdlen - 4), $$currstmt);
+		}
 		elsif (($tdflavor !=  $PclDATAINFO) &&
 			($tdflavor !=  $PclPOSEND)) {
 			$lasterr{$sessno} = $BADPARCEL;
@@ -2126,27 +2044,22 @@ sub fetch { # sessno
 		($tdflavor, $tdlen) = unpack("SS", $rspmsg);
 	}
 
-	my $retstr = substr($rspmsg, 4, $tdlen - 4);
+	if (defined($ary)) {
+		my $i = 0;
+		for ($i = 0; (($i < $maxlen) && ($rspmsg ne '') && ($tdflavor == $PclRECORD)); $i++) {
+		 	$$ary[$i] = pack('Sa*c', $tdlen-4, substr($rspmsg, 4, $tdlen - 4), 10);
+		 	$rspmsg = substr($rspmsg, $tdlen);
+			($tdflavor, $tdlen) = unpack("SS", $rspmsg);
+		}
+		$curresp{$sessno} = $rspmsg;
+		return $i;
+	}
+	$$retstr = substr($rspmsg, 4, $tdlen - 4);
 	if (length($rspmsg) > $tdlen) {
 		$curresp{$sessno} = substr($rspmsg, $tdlen);
 	}
 	else { $curresp{$sessno} = ''; }
-	return $retstr;
-}
-#
-#	fetch all rows from result set
-#
-sub fetch_array { #sessno
-	my $sessno = pop(@_);
-	my $i = 0;
-	my @rowset;
-	my $row = '';
-	while (1) {
-		$row = fetch($sessno);
-		if (!defined($row)) { return undef; }
-		if ($row eq '') { return @rowset; }
-		$rowset[$i++] = $row;
-	}
+	return 1;
 }
 
 sub commit {
@@ -2327,6 +2240,58 @@ sub FirstAvailable {
 	return undef;
 }
 
+sub FirstAvailList {	# same as FirstAvailable, but returns list of all available
+#
+#	NOTE: we can only handle less than 30 sessions here, since
+#	select() uses bit vectors, and they can only hold 32 bits,
+#	and we know that its likely that fileno's 0, 1, and 2 are
+#	probably taken...in future, we may need to set the sockets
+#	to nonblock mode (if possible), and manually poll them
+#	(not pretty). Better still, we may multithread from here...
+#
+	my ($sesslist, $timeout) = @_;
+	my $i = 0;
+	my $rmask = '';
+	my $wmask = '';
+	my $emask = '';
+	my ($rout, $wout, $eout);
+	my $sessno = 0;
+	if ($timeout == -1) { $timeout = undef; }
+	foreach $sessno (@$sesslist) {
+		if ($sesstate{$sessno} == 1) { 
+			vec($rmask, fileno($sesmap{$sessno}), 1) = 1;
+			$i++;
+		}
+	}
+	if ($i == 0) { 
+		return undef; 
+	}
+	$wmask = 0;
+	$emask = $rmask;
+	my $n = select($rout=$rmask, undef, $eout=$emask, $timeout);
+	if ($n <= 0) { 
+		return undef; 
+	}
+
+	my @avails = ();
+	foreach $i (@$sesslist) {
+		if (vec($rout, fileno($sesmap{$i}), 1) == 1) {
+			push(@avails, $i);
+		}
+	}
+	if (scalar(@avails) != 0) { return @avails; }
+#
+#	check for errors
+#
+	foreach $i (@$sesslist) {
+		if (vec($eout, fileno($sesmap{$i}), 1) == 1) {
+			push(@avails, $i);
+		}
+	}
+	if (scalar(@avails) != 0) { return @avails; }
+	return undef;
+}
+
 sub Realize {
 	my ($sessno, $stmtinfo, $stmtno) = @_;
 #
@@ -2429,10 +2394,31 @@ sub newsocket {
 	return *FH;
 }
 
+sub append_buf {
+	my ($sessno, $mode, $row) = @_;
+	$sesbuff{$sessno} .= 
+		pack('SS', (($mode eq 'IndicatorMode') ? $PclINDICDATA : $PclDATA), (length($row)+4)) . 
+			$row;
+	return length($sesbuff{$sessno});
+}
+
+sub get_buf_len {
+	my ($sessno) = @_;
+	return length($sesbuff{$sessno});
+}
+
+sub clear_buf {
+	my ($sessno) = @_;
+	$sesbuff{$sessno} = '';
+	1;
+}
+1;
+
+{
 package DBD::Teradata;
 
 use vars qw($VERSION $err $errstr $state $drh %connections);
-$VERSION = "1.10";
+$VERSION = "1.11";
 $drh = undef;
 %connections = ();
 $err = 0;
@@ -2461,6 +2447,10 @@ sub driver {
 	return $drh;
 }
 
+1;
+}
+
+{
 package DBD::Teradata::dr;
 
 $DBD::Teradata::dr::imp_data_size = 0;
@@ -2470,70 +2460,13 @@ sub connect {
 	my $host;
 	my $port;
 #
-#	extract hostname, port, and optional partition from DSN
-#	support fastload utility interfaces via DSN
+#	extract hostname and optional port from DSN
 #
-#	heres the normal case
-#
-	my $partition = 'SQL';
-	my $numsessions = 1;
-	if (($dsn !~/:fastload/) && ($dsn !~/:fastexport/)) {
-		if ($dsn =~ /^(.*):(\d+)$/) {
-			($host,$port) = ($1,$2);
-		}
-		elsif ($dsn =~ /^(.*)$/) {
-			$host = $1;
-			$port = 1025;
-		}
-		else {
-			$drh->DBI::set_err('08001', "Malformed dsn $dsn");
-			return undef;
-		}
-	}
-	elsif ($dsn =~ /^(.*):(.*):fastload$/) {
-		$partition = 'FASTLOAD';
-		$numsessions = 32;
+	my $partition = 'DBC/SQL';
+	if ($dsn =~ /^(.*):(\d+)$/) {
 		($host,$port) = ($1,$2);
 	}
-	elsif ($dsn =~ /^(.*):(.*):fastload:(\d+)$/) {
-		$partition = 'FASTLOAD';
-		$numsessions = $3;
-		($host,$port) = ($1,$2);
-	}
-	elsif ($dsn =~ /^(.*):fastload$/) {
-		$partition = 'FASTLOAD';
-		$numsessions = 32;
-		$host = $1;
-		$port = 1025;
-	}
-	elsif ($dsn =~ /^(.*):fastload:(\d+)$/) {
-		$partition = 'FASTLOAD';
-		$numsessions = $2;
-		$host = $1;
-		$port = 1025;
-	}
-#
-#	support fastexport utility interfaces via DSN
-#
-	elsif ($dsn =~ /^(.*):(.*):fastexport$/) {
-		$partition = 'FEXP';
-		$numsessions = 32;
-		($host,$port) = ($1,$2);
-	}
-	elsif ($dsn =~ /^(.*):(.*):fastexport:(\d+)$/) {
-		$partition = 'FEXP';
-		$numsessions = $3;
-		($host,$port) = ($1,$2);
-	}
-	elsif ($dsn =~ /^(.*):fastexport$/) {
-		$partition = 'FEXP';
-		$numsessions = 32;
-		$host = $1;
-		$port = 1025;
-	}
-	elsif ($dsn =~ /^(.*):fastexport:(\d+)$/) {
-		$partition = 'FEXP';
-		$numsessions = $2;
+	elsif ($dsn =~ /^(.*)$/) {
 		$host = $1;
 		$port = 1025;
 	}
@@ -2542,9 +2475,40 @@ sub connect {
 		return undef;
 	}
 #
+#	check on attributes
+#
+	my $lsn = undef;
+	if (defined($attr)) {
+		foreach my $key (keys(%$attr)) {
+			if ($key eq 'tdat_lsn') {
+				$lsn = $$attr{'tdat_lsn'};
+				if ($lsn=~/\D+/) {
+					$DBD::Teradata::err = -1;
+					$DBD::Teradata::errstr = 'Non-numeric LSN specified.';
+					return undef;
+				}
+			}
+			elsif ($key eq 'tdat_utility') {
+				$partition = $$attr{'tdat_utility'};
+				if (($partition ne 'DBC/SQL') && ($partition ne 'FASTLOAD') && 
+					($partition ne 'EXPORT') && ($partition ne 'MONITOR')) {
+					$DBD::Teradata::err = -1;
+					$DBD::Teradata::errstr = 'Unsupported partition specified.';
+					return undef;
+				}
+			}
+		}
+	}
+#
+#	now connect to the DBMS
+#
+	my $sessno = DBD::Teradata::impl::connect($host, $port, $user, $auth, undef, \$lsn, $partition,
+		\$DBD::Teradata::err, \$DBD::Teradata::errstr);
+	if (!defined($sessno)) {
+		return undef;
+	}
+#
 #	create a new connection handle for a connection
-#	NOTE: we would normally invoke the internal connection()
-#	method before this
 #
 	my $dbh = DBI::_new_dbh($drh,{
 		'Name' => $dsn,
@@ -2552,20 +2516,19 @@ sub connect {
 		'CURRENT_USER' => $user
 	});
 #
-#	store our useful info here
+#	store our useful info here, and make sure to 
+#	reflect it back up
 #
-	$dbh->STORE('tdat_host', $host);
-	$dbh->STORE('tdat_partition', $partition);
-	$dbh->STORE('tdat_numsessions', $numsessions);
-#
-#	now connect to the DBMS
-#
-	my $sessno = DBD::Teradata::impl::connect($host, $port, $user, $auth);
-	if (!defined($sessno)) {
-		$DBD::Teradata::err = 1;
-		$DBD::Teradata::errstr = "Can't connect to $host at $port";
-		return undef;
+	if (defined($attr)) {
+		foreach my $key (keys(%$attr)) {
+			if ($key eq 'tdat_lsn') {
+				$$attr{'tdat_lsn'} = $lsn;
+			}
+		}
 	}
+	$dbh->STORE('tdat_lsn', $lsn);
+	$dbh->STORE('tdat_host', $host);
+	$dbh->STORE('tdat_utility', $partition);
 	$dbh->STORE('tdat_sessno', $sessno);
 #	
 #	save the handle for future reference
@@ -2615,6 +2578,7 @@ sub FirstAvailable {
 		$sesslist[$i++] = $dbh->{'tdat_sessno'};
 	}
 	my $sessno = DBD::Teradata::impl::FirstAvailable(\@sesslist, $timeout);
+	if (!defined($sessno)) { return undef; }
 #
 #	now lookup the handle for the returned session, then return
 #	its index to caller
@@ -2630,7 +2594,74 @@ sub FirstAvailable {
 #
 	return undef;
 }
+#
+#	wait for first idle session
+#
+sub FirstAvailList {
+	my($drh, $dbhlist, $timeout) = @_;
+	my $i = 0;
+	my @sesslist;
+#
+#	default timeout is wait forever
+#
+	if (!defined($timeout)) { $timeout = -1; }
+	my $dbh;
+	foreach $dbh (@$dbhlist) {
+#
+#	note that we allow undefined entries in the input
+#	handle array, to make life easier for the application
+#
+		if (!defined($dbh)) { next; }
+		$sesslist[$i++] = $dbh->{'tdat_sessno'};
+	}
+	my @outlist = DBD::Teradata::impl::FirstAvailList(\@sesslist, $timeout);
+	if (!@outlist) { return undef; }
+#
+#	now lookup the handle for each returned session, and add it's index to the
+#	list we return to caller
+#
+	my @outdbhs = ();
+	foreach $i (@outlist) {
+		for (my $j = 0; $j < scalar(@$dbhlist); $j++) {
+			if ((defined($$dbhlist[$j])) && ($i == $$dbhlist[$j]->{'tdat_sessno'})) { 
+				push(@outdbhs, $j);
+				last;
+			}
+		}
+	}
+	return @outdbhs;
+}
+#
+#	UtilityLogon connects several utility sessions using the input
+#	user, password, partition, and LSN, and prepares statement handles
+#	on each of them using the input statement and attributes
+#
+sub UtilityLogon {
+	my ($drh, $host, $user, $pass, $numsess, $partition, $lsn, $dbhary, $sthary, $stmt, $attr) = @_;
+	
+	@$dbhary = ();
+	for my $i (0..$numsess-1) {
+		$$dbhary[$i] = DBI->connect("dbi:Teradata:$host", $user, $pass,
+			{
+				PrintError => 0,
+				RaiseError => 0,
+				AutoCommit => 0,
+				tdat_lsn => $lsn,
+				tdat_utility => $partition
+			}
+		);
+	}
+	
+	@$sthary = ();
+	for my $i (0..$numsess-1) {
+		$$sthary[$i] = $$dbhary[$i]->prepare($stmt, $attr);
+	}
+	return $numsess;
+}
+1;
+}
 
+{
 package DBD::Teradata::db;
 
 $DBD::Teradata::db::imp_data_size = 0;
@@ -2650,16 +2681,25 @@ sub prepare {
 	my $attr;
 	if (defined($attribs)) {
 		foreach $attr (keys(%$attribs)) {
-			if (($attr ne 'tdat_nowait') && ($attr ne 'tdat_raw')) {
+			if (($attr ne 'tdat_nowait') && ($attr ne 'tdat_raw') && 
+				($attr ne 'tdat_keepresp') && ($attr ne 'tdat_clone')) {
 				$DBD::Teradata::err = -1;
 				$DBD::Teradata::errstr = "Unknown statement attribute \"$attr\".";
 				return undef;
 			}
-			if (($attr eq 'tdat_raw') && ($$attribs{$attr} ne 'RecordMode') &&
+			elsif (($attr eq 'tdat_raw') && ($$attribs{$attr} ne 'RecordMode') &&
 				($$attribs{$attr} ne 'IndicatorMode')) {
 				$DBD::Teradata::err = -1;
 				$DBD::Teradata::errstr = 'Invalid raw mode value.';
 				return undef;
+			}
+			elsif ($attr eq 'tdat_clone') {
+				my $csth = $$attribs{'tdat_clone'};
+				if (ref $csth ne 'DBI::st') {
+					$DBD::Teradata::err = -1;
+					$DBD::Teradata::errstr = 'tdat_clone value must be DBI statement handle.';
+					return undef;
+				}
 			}
 		}
 	}
@@ -2668,107 +2708,232 @@ sub prepare {
 #
 #	Teradata doesn't like newlines, tabs, etc., so replace them
 #
-	$stmt =~s/[\n\r\t]/ /g;
+	if (($dbh->{'tdat_utility'} eq 'DBC/SQL') || ($dbh->{'tdat_utility'} eq 'MONITOR')) {
+		$stmt =~s/[\n\r\t]/ /g;
+	}
 #
 #	setup to collect all the returned column info
 #
-	my @fname = [];		# fieldnames
-	my @fname_uc = [];	# uppercase
-	my @fname_lc = [];	# lowercase
-	my @ftype = [];		# field type
-	my @ftitle = [];		# field titles
-	my @fformat = [];		# field formats
-	my @fprec = [];		# field precision/length
-	my @fscale = [];	# field scale (DECIMAL type only)
-	my @fnullable = [];	# is field nullable
-	my @ptypes = [];	# parameter types
-	my @plens = [];		# parameter lengths
-	my $packstr = '';	# Perl pack/unpack descriptor for row
+	my @fname = ();		# fieldnames
+	my @fname_uc = ();	# uppercase
+	my @fname_lc = ();	# lowercase
+	my @ftype = ();		# field type
+	my @ftitle = ();		# field titles
+	my @fformat = ();		# field formats
+	my @fprec = ();		# field precision/length
+	my @fscale = ();	# field scale (DECIMAL type only)
+	my @fnullable = ();	# is field nullable
+	my @ptypes = ();	# parameter types
+	my @plens = ();		# parameter lengths
 	my $usephs = 0;		# if using '?', set to number of params
-	my @stmtinfo = [];	# stmtinfo of each stmt in request
+	my @stmtinfo = ();	# stmtinfo of each stmt in request
 
-	my @acttype = [];	# type of each stmt in request
-	my @actcount = [];	# rows effected by each stmt in request
-	my @actwarns = [];	# warnings for each stmt in request
-	my @actstarts = [];	# start index of each SELECT stmt in output row
-	my @actends = [];	# ending index of each SELECT stmt in output row
-	my @actsumstarts = []; # start index of summary columns in output row
-	my @actsumends = []; # end index of summary columns in output row
+	my @acttype = ();	# type of each stmt in request
+	my @actcount = ();	# rows effected by each stmt in request
+	my @actwarns = ();	# warnings for each stmt in request
+	my @actstarts = ();	# start index of each SELECT stmt in output row
+	my @actends = ();	# ending index of each SELECT stmt in output row
+	my @actsumstarts = (); # start index of summary columns in output row
+	my @actsumends = (); # end index of summary columns in output row
 	my $issum = undef;	# indicates whether a summary row is fetched
-	my $numparams = DBD::Teradata::impl::prepare($sessno, $stmt, 
-		\@fname, \@ftype, \@fprec, \@fscale, \@fnullable, \@ptypes, \@plens,
-		\$packstr, \$usephs, \@acttype, \@actcount, \@actwarns,
-		\@actstarts, \@actends, \@actsumstarts, \@actsumends, \@ftitle, \@fformat);
-	if (!defined($numparams)) {
-		$DBD::Teradata::err = DBD::Teradata::impl::err($sessno);
-		$DBD::Teradata::errstr = DBD::Teradata::impl::errstr($sessno);
-		return undef;
+	my $numparams = 0;
+	
+	if ($dbh->FETCH('tdat_utility') eq 'EXPORT') {
+#
+#	exports use binary statements, so don't prepare
+#	check for an inherited statement handle, and copy its
+#	attributes
+#
+		@stmtinfo = (
+			undef, 
+			{
+				ActivityType => "Export",
+				ActivityCount => 0,
+				Warning => undef,
+				StartsAt => undef,
+				EndsAt => undef,
+				IsSummary => undef,
+				SummaryStarts => undef,
+				SummaryEnds => undef
+			},
+			undef
+		);
+		if (defined($$attribs{'tdat_clone'})) {
+			my $csth = $$attribs{'tdat_clone'};
+			my $cstmtinfo = $csth->{'tdat_stmt_info'};
+			my $cstmthash = $$cstmtinfo[1];
+			
+			$stmtinfo[1] = {
+				ActivityType => "Export",
+				ActivityCount => 0,
+				Warning => undef,
+				StartsAt => $$cstmthash{'StartsAt'},
+				EndsAt => $$cstmthash{'EndsAt'},
+				IsSummary => undef,
+				SummaryStarts => undef,
+				SummaryEnds => undef
+			};
+
+			@fname = @{($csth->{NAME})};
+			@ftype = @{($csth->{TYPE})};
+			@ftitle = @{($csth->{tdat_TITLE})};
+			@fformat = @{($csth->{tdat_FORMAT})};
+			@fprec = @{($csth->{PRECISION})};
+			@fscale = @{($csth->{SCALE})};
+			@fnullable = @{($csth->{NULLABLE})};
+			@ptypes = (DBI::SQL_INTEGER, DBI::SQL_INTEGER);
+			@plens = (4, 4);
+			$numparams = 2;
+		}
+	}
+	elsif ($stmt=~/^\s*(BEGIN|CHECKPOINT|END)\s+LOADING/i) {
+#
+#	bypass prepare on these, let execute deal with them
+#
+		@stmtinfo = (
+			undef, 
+			{
+				ActivityType => "$1 Loading",
+				ActivityCount => 0,
+				Warning => undef,
+				StartsAt => undef,
+				EndsAt => undef,
+				IsSummary => undef,
+				SummaryStarts => undef,
+				SummaryEnds => undef
+			},
+			undef
+		);
+	}
+	elsif ($stmt=~/^\s*(BEGIN|END)\s+FASTEXPORT/i) {
+#
+#	bypass prepare on these, let execute deal with them
+#
+		@stmtinfo = (
+			undef, 
+			{
+				ActivityType => "$1 Export",
+				ActivityCount => 0,
+				Warning => undef,
+				StartsAt => undef,
+				EndsAt => undef,
+				IsSummary => undef,
+				SummaryStarts => undef,
+				SummaryEnds => undef
+			},
+			undef
+		);
+	}
+	elsif ($dbh->FETCH('tdat_utility') eq 'MONITOR') {
+#
+#	bypass prepare on these, let execute deal with them
+#
+		@stmtinfo = (
+			undef, 
+			{
+				ActivityType => "PMPC",
+				ActivityCount => 0,
+				Warning => undef,
+				StartsAt => undef,
+				EndsAt => undef,
+				IsSummary => undef,
+				SummaryStarts => undef,
+				SummaryEnds => undef
+			},
+			undef
+		);
+#
+#	provide some dummy parameter info
+#
+		$numparams = 16;
+		$usephs = 1;
+	}
+	else {
+		$numparams = DBD::Teradata::impl::prepare($sessno, $stmt, 
+			\@fname, \@ftype, \@fprec, \@fscale, \@fnullable, \@ptypes, \@plens,
+			\$usephs, \@acttype, \@actcount, \@actwarns,
+			\@actstarts, \@actends, \@actsumstarts, \@actsumends, \@ftitle, \@fformat,
+			$dbh->{'tdat_utility'});
+		if (!defined($numparams)) {
+			$DBD::Teradata::err = DBD::Teradata::impl::err($sessno);
+			$DBD::Teradata::errstr = DBD::Teradata::impl::errstr($sessno);
+			return undef;
+		}
+
+		for (my $i = 1; $i <= scalar(@acttype); $i++) {
+			my %stmthash;
+			$stmthash{'ActivityType'} = (defined($acttype[$i])) ? $acttype[$i] : undef;
+			$stmthash{'ActivityCount'} = (defined($actcount[$i])) ? $actcount[$i] : undef;
+			$stmthash{'Warning'} = (defined($actwarns[$i])) ? $actwarns[$i] : undef;
+			$stmthash{'StartsAt'} = (defined($actstarts[$i])) ? $actstarts[$i] : undef;
+			$stmthash{'EndsAt'} = (defined($actends[$i])) ? $actends[$i] : undef;
+			$stmthash{'IsSummary'} = undef;
+			$stmthash{'SummaryStarts'} = (defined($actsumstarts[$i])) ? 
+				$actsumstarts[$i] : undef;
+			$stmthash{'SummaryEnds'} = (defined($actsumends[$i])) ? 
+				$actsumends[$i] : undef;
+			$stmtinfo[$i] = \%stmthash;
+		}
 	}
 #
 # 	save type of activity for each statement in request or macro,
 #	and rows effected/retrieved
 #
-	my ($outer, $sth) = DBI::_new_sth($dbh, {
-		'Statement' => $stmt,
-		});
+	my ($outer, $sth) = DBI::_new_sth($dbh, { Statement => $stmt });
 #
 #	if attributes supplied, verify and save them
 #
 	$sth->STORE('tdat_nowait', 0);
-	$sth->STORE('tdat_explain', 0);
 	if (defined($attribs)) {
 		foreach $attr (keys(%$attribs)) {
+			if ($attr eq 'tdat_clone') { next; }	# don't save inherited statement handle
 			$sth->STORE($attr, $$attribs{$attr});
 		}
 	}
 	$sth->STORE('tdat_sessno', $sessno);
-
-	my $i;
-	for ($i = 1; $i <= scalar(@acttype); $i++) {
-		my %stmthash;
-		$stmthash{'ActivityType'} = (defined($acttype[$i])) ? $acttype[$i] : undef;
-		$stmthash{'ActivityCount'} = (defined($actcount[$i])) ? $actcount[$i] : undef;
-		$stmthash{'Warning'} = (defined($actwarns[$i])) ? $actwarns[$i] : undef;
-		$stmthash{'StartsAt'} = (defined($actstarts[$i])) ? $actstarts[$i] : undef;
-		$stmthash{'EndsAt'} = (defined($actends[$i])) ? $actends[$i] : undef;
-		$stmthash{'IsSummary'} = undef;
-		$stmthash{'SummaryStarts'} = (defined($actsumstarts[$i])) ? 
-			$actsumstarts[$i] : undef;
-		$stmthash{'SummaryEnds'} = (defined($actsumends[$i])) ? 
-			$actsumends[$i] : undef;
-		$stmtinfo[$i] = \%stmthash;
-	}
 	$sth->STORE('tdat_stmt_num' => 0);
 	$sth->STORE('tdat_stmt_info' => \@stmtinfo);
+	$sth->STORE('tdat_rows' => -1);
+#
+#	make sure utility sessions use same wait semantic as statement
+#
+	if ($dbh->FETCH('tdat_utility') ne 'DBC/SQL') {
+		$dbh->STORE('tdat_nowait', $sth->FETCH('tdat_nowait'));
+	}
 #
 #	save input parameter values, types, and lengths
 #
-	$sth->STORE('tdat_params' => []);
+	my @params = ();
+	$sth->STORE('tdat_params' => \@params);
 	$sth->STORE('tdat_ptypes' => \@ptypes);
 	$sth->STORE('tdat_plens' => \@plens);
 	$sth->STORE('tdat_usephs' => $usephs); # 0 => USING clause, else PH's
 	$sth->STORE('NUM_OF_PARAMS' => $numparams);
 
-	if (defined(@fname)) {
+	if (($dbh->FETCH('tdat_utility') eq 'MONITOR') &&
+		(!defined($sth->FETCH('tdat_raw')))) {
+		$sth->STORE('NUM_OF_FIELDS' => 255);
+	}
+	else {
 		$sth->STORE('NUM_OF_FIELDS' => scalar(@fname));
+	}
 #
 #	generate all upper and lower case field names (is this trip really neccesary ?)
 #
-		for (my $i = 0; $i < scalar(@fname); $i++) {
-			$fname_lc[$i] = "\L$fname[$i]\E";
-			$fname_uc[$i] = "\U$fname[$i]\E";
-		}
-	
-		$sth->{NAME} = \@fname;
-		$sth->{NAME_lc} = \@fname_lc;
-		$sth->{NAME_uc} = \@fname_uc;
-		$sth->{TYPE} = \@ftype;
-		$sth->{PRECISION} = \@fprec;
-		$sth->{SCALE} = \@fscale;
-		$sth->{NULLABLE} = \@fnullable;
-		$sth->{tdat_TITLE} = \@ftitle;
-		$sth->{tdat_FORMAT} = \@fformat;
+	for (my $i = 0; $i < scalar(@fname); $i++) {
+		$fname_lc[$i] = "\L$fname[$i]\E";
+		$fname_uc[$i] = "\U$fname[$i]\E";
 	}
+	
+	$sth->{NAME} = \@fname;
+	$sth->{NAME_lc} = \@fname_lc;
+	$sth->{NAME_uc} = \@fname_uc;
+	$sth->{TYPE} = \@ftype;
+	$sth->{PRECISION} = \@fprec;
+	$sth->{SCALE} = \@fscale;
+	$sth->{NULLABLE} = \@fnullable;
+	$sth->{tdat_TITLE} = \@ftitle;
+	$sth->{tdat_FORMAT} = \@fformat;
 	$outer;
 }
 		
@@ -2807,6 +2972,26 @@ sub commit {
 #	explicit transaction mode, so send ET;
 #
 	my $sessno = $dbh->FETCH('tdat_sessno');
+
+	if (($dbh->FETCH('tdat_utility') eq 'FASTLOAD') &&
+		(DBD::Teradata::impl::get_buf_len($sessno) > 0)) {
+#
+#	transfer accumulated buffer to DBMS
+#
+		my $stmtno = 0;
+		my @stmtinfo = ( undef, { });
+		$DBD::Teradata::impl::sesinxact{$sessno} = 0;
+		my $rowcnt = DBD::Teradata::impl::execute( $sessno, undef, undef,
+			undef, $dbh->FETCH('tdat_nowait'), \@stmtinfo, \$stmtno, 
+			undef, undef, undef);
+		if (!defined($rowcnt)) {
+			$DBD::Teradata::err = DBD::Teradata::impl::err($sessno);
+			$DBD::Teradata::errstr = DBD::Teradata::impl::errstr($sessno);
+			return undef;
+		}
+		return 1;
+	}
+
 	if ($DBD::Teradata::impl::sesinxact{$sessno} != 0) {
 		DBD::Teradata::impl::tddo($sessno, 'ET;');
 		$DBD::Teradata::impl::sesinxact{$sessno} = 0;
@@ -2825,9 +3010,17 @@ sub rollback {
 		return 1;
 	}
 #
-#	explicit transaction mode, so send ABORT;
+#	purge accumulated buffer
 #
 	my $sessno = $dbh->FETCH('tdat_sessno');
+	if ($dbh->FETCH('tdat_utility') eq 'FASTLOAD') {
+		DBD::Teradata::impl::clear_buf;
+		$DBD::Teradata::impl::sesinxact{$sessno} = 0;
+		return 1;
+	}
+#
+#	explicit transaction mode, so send ABORT;
+#
 	if ($DBD::Teradata::impl::sesinxact{$sessno} != 0) {
 		DBD::Teradata::impl::tddo($sessno, 'ABORT;');
 		$DBD::Teradata::impl::sesinxact{$sessno} = 0;
@@ -2870,13 +3063,59 @@ sub err {
 	my $sessno = $dbh->{'tdat_sessno'};
 	return DBD::Teradata::impl::err($sessno);
 }
+1;
+}
 
+{
 package DBD::Teradata::st;
 
 $DBD::Teradata::st::imp_data_size = 0;
 
+sub BindColArray {
+	my ($sth, $pNum, $ary, $maxlen) = @_;
+
+	if (ref $ary ne 'ARRAY') {
+		$DBD::Teradata::err = -1;
+		$DBD::Teradata::errstr = 'BindColArray() requires arrayref parameter.';
+		return undef;
+	}
+	if ($pNum <= 0) {
+		$DBD::Teradata::err = -1;
+		$DBD::Teradata::errstr = 'Invalid column number.';
+		return undef;
+	}
+	
+	my $c = $sth->FETCH('tdat_colary');
+	if (!defined($c)) {
+		my @colary = ();
+		$c = \@colary;
+		$sth->STORE('tdat_colary', \@colary);
+	}
+	$$c[$pNum] = $ary;
+	if (defined($maxlen)) {
+		my $ml = $sth->FETCH('tdat_maxcolary');
+		if ((!defined($ml)) || ($ml < $maxlen)) {
+			$sth->STORE('tdat_maxcolary', $maxlen);
+		}
+	}
+	1;
+}
+
 sub bind_param {
 	my ($sth, $pNum, $val, $attr) = @_;
+
+	if (ref $val eq 'ARRAY') {
+#
+#	array params only valid on FASTLOAD
+#
+		my $sessno = $sth->FETCH('tdat_sessno');
+		my $dbh = $DBD::Teradata::connections{$sessno};
+		if ($dbh->FETCH('tdat_utility') ne 'FASTLOAD') {
+			$DBD::Teradata::err = -1;
+			$DBD::Teradata::errstr = 'BindParamArray() valid only for FASTLOAD sessions.';
+			return undef;
+		}
+	}
 #
 #	default data type for placeholders is VARCHAR or default size
 #
@@ -2900,24 +3139,32 @@ sub bind_param {
 	}
 
 	my $params = $sth->FETCH('tdat_params');
-	$params->[$pNum-1] = $val;
+	$$params[$pNum-1] = $val;
 	if ($usephs) {
 		my $ptypes = $sth->FETCH('tdat_ptypes');
 		$ptypes->[$pNum-1] = $type;
 		my $plens = $sth->FETCH('tdat_plens');
-		if (($type == DBI::SQL_CHAR) ||
-			($type == DBI::SQL_VARCHAR) ||
-			($type == DBI::SQL_BINARY) ||
+		if (($type == DBI::SQL_VARCHAR) ||
+			($type == DBI::SQL_LONGVARCHAR) ||
 			($type == DBI::SQL_LONGVARBINARY) ||
 			($type == DBI::SQL_VARBINARY)) {
 			$plens->[$pNum-1] = (defined($val)) ? 
-				length($val) : $DBD::Teradata::impl::phdfltsz;
+				length($val) : $phdfltsz;
 		}
 		else {
 			$plens->[$pNum-1] = $tlen;
 		}
 	}
 	1;
+}
+*BindParamArray = \&bind_param;
+
+sub bind_param_inout {
+	my ($sth, $pNum, $val, $maxlen, $attr) = @_;
+#
+#	what do I need maxlen for ???
+#
+	return bind_param($sth, $pNum, $val, $attr);
 }
 
 sub execute {
@@ -2931,6 +3178,10 @@ sub execute {
 	my $ptypes = $sth->FETCH('tdat_ptypes');
 	my $plens = $sth->FETCH('tdat_plens');
 	my $usephs = $sth->FETCH('tdat_usephs');
+
+	my $sessno = $sth->FETCH('tdat_sessno');
+	my $dbh = $DBD::Teradata::connections{$sessno};
+	my $loading = ($dbh->FETCH('tdat_utility') eq 'FASTLOAD') ? 1 : 0;
 #
 #	if params provided directly, then force
 #	VARCHAR(256) type
@@ -2947,20 +3198,101 @@ sub execute {
 #	row buffer
 #
 	my $rawmode = $sth->FETCH('tdat_raw');
-	if (($numParam != 0) && (defined($rawmode))) { $numParam = 1; }
-	if (@$params > $numParam) {
-		$sth->DBI::set_err(1, "Too many parameters provided");
+	if (($dbh->FETCH('tdat_utility') ne 'EXPORT') &&
+		($numParam != 0) && (defined($rawmode))) { $numParam = 1; }
+	if (defined($params) && (@$params > $numParam)) {
+		$DBD::Teradata::err = -1;
+		$DBD::Teradata::errstr = 'Too many parameters provided.';
 		return undef;
 	}
-	if ((@$params == 0) && ($numParam != 0)) {
-		$sth->DBI::set_err(1, 
-			"No parameters provided for parameterized statement.");
+	if ((!defined($params)) && ($numParam != 0) && (!defined($dbh->FETCH('tdat_loading')))) {
+		$DBD::Teradata::err = -1;
+		$DBD::Teradata::errstr = 
+			'No parameters provided for parameterized statement.';
 		return undef;
 	}
+	my $stmtno = 0;
+#
+#	need to check for array or in/out params, and adjust as needed
+#
+	my $maxparmlen = 1;
+	for (my $i = 0; $i < $numParam; $i++) {
+		if ((ref $$params[$i] eq 'ARRAY') &&
+			(scalar(@{$$params[$i]}) > $maxparmlen)) { 
+				$maxparmlen = scalar(@{$$params[$i]}); 
+		}
+	}
+#
+#	handle EXPORT case
+#
+	if ($dbh->FETCH('tdat_utility') eq 'EXPORT') {
+		my $stmt = '';
+		for (my $i = 0; $i < 2; $i++) {
+			if ($$ptypes[$i] != DBI::SQL_INTEGER) {
+				$DBD::Teradata::err = -1;
+				$DBD::Teradata::errstr = 
+					'EXPORT session requires 2 non-NULL INTEGER parameters.';
+				return undef;
+			}
+			my $p = $$params[$i];
+			if (!defined($p)) {
+				$DBD::Teradata::err = -1;
+				$DBD::Teradata::errstr = 
+					'EXPORT session requires 2 non-NULL INTEGER parameters.';
+				return undef;
+			}
+			if (ref $p eq 'ARRAY') {
+				$p = $$p[0];
+				$DBD::Teradata::err = -1;
+				$DBD::Teradata::errstr = 
+					'Parameter arrays not supported for EXPORT sessions.';
+				return undef;
+			}
+			if (ref $p eq 'SCALAR') {
+				$p = $$p;
+			}
+			$stmt .= pack('L', $p);
+		}
+
+		my $rowcnt = DBD::Teradata::impl::execute( $sessno, 
+			$stmt, '', '', $sth->FETCH('tdat_nowait'), 
+			$sth->FETCH('tdat_stmt_info'),
+			\$stmtno, undef, undef, $sth);
+
+		if (!defined($rowcnt)) {
+			$DBD::Teradata::err = DBD::Teradata::impl::err($sessno);
+			$DBD::Teradata::errstr = DBD::Teradata::impl::errstr($sessno);
+		}
+		$sth->STORE('tdat_stmt_num' => $stmtno);
+		return $rowcnt;
+	}
+#
+#	check for fastload control BEGIN LOADING
+#
+	if (($dbh->FETCH('tdat_utility') eq 'DBC/SQL') &&
+		defined($dbh->FETCH('tdat_lsn')) &&
+		($sth->FETCH('Statement')=~/^\s*BEGIN\s+LOADING/i)) {
+
+		my $rowcnt = DBD::Teradata::impl::execute( $sessno, 
+			$sth->FETCH('Statement'), '', '', 0, 
+			$sth->FETCH('tdat_stmt_info'),
+			\$stmtno, undef, undef, $sth);
+
+		if (!defined($rowcnt)) {
+			$DBD::Teradata::err = DBD::Teradata::impl::err($sessno);
+			$DBD::Teradata::errstr = DBD::Teradata::impl::errstr($sessno);
+		}
+		else {
+			$dbh->STORE('tdat_loading', 1);
+		}
+		$sth->STORE('tdat_stmt_num' => $stmtno);
+		return $rowcnt;
+	}
+	
 	my $datainfo = '';
 	my $indicdata = '';
-	my $fldcnt = $numParam;
-	if (@$params != 0) {
+	my $fldcnt = ($dbh->FETCH('tdat_utility') eq 'MONITOR') ? scalar(@$params) : $numParam;
+	if (defined($params) && (@$params != 0)) {
 		if ($usephs != 0) {
 #
 #	DATAINFO parcel only needed for statements with placeholders,
@@ -2975,9 +3307,17 @@ sub execute {
 #	since we assumed max length 256, we need to increase here if
 #	input param is actually bigger than 256 bytes
 #
-					if (defined($$params[$i]) && 
-						(length($$params[$i]) > $$plens[$i])) {
-						$$plens[$i] = length($$params[$i]);
+					my $p = $$params[$i];
+					if (defined($p)) {
+						if (ref $p eq 'ARRAY') {
+							$p = $$p[0];
+						}
+						elsif (ref $p eq 'SCALAR') {
+							$p = $$p;
+						}
+					}
+					if (defined($p) && (length($p) > $$plens[$i])) {
+						$$plens[$i] = length($p);
 					}
 					$datainfo .= pack('SS', $ptypecodes{DBI::SQL_VARCHAR}+1, 
 						2 + $$plens[$i]);
@@ -2993,96 +3333,163 @@ sub execute {
 			}
 			$datainfo = pack('Sa*', $i, $datainfo);
 		}
-		if (!defined($rawmode)) {
+#
+#	iterate if in param array mode
+#
+		for (my $k = 0; $k < $maxparmlen; $k++) {
+			if (!defined($rawmode)) {
 #
 #	build INDICDATA parcel
 #
-			my @indicvec = DBD::Teradata::impl::initIndic($numParam);
-			my $ptypes = $sth->FETCH('tdat_ptypes');
-			my $plens = $sth->FETCH('tdat_plens');
-			for (my $i = 0; $i < $fldcnt; $i++) {
+				my @indicvec = DBD::Teradata::impl::initIndic($fldcnt);
+				my $ptypes = $sth->FETCH('tdat_ptypes');
+				my $plens = $sth->FETCH('tdat_plens');
+				for (my $i = 0; $i < $fldcnt; $i++) {
+#
+#	adjust for param arrays
+#
+					my $p = $$params[$i];
+					if (defined($p)) {
+						if (ref $p eq 'ARRAY') {
+							if (scalar(@$p) < $k) {
+								undef $p;
+							}
+							else {
+								$p = $$p[$k];
+							}
+						}
+						elsif (ref $p eq 'SCALAR') {
+							$p = $$p;
+						}
+					}
 #
 #	backfill NULLs
 #
-				if (!defined($$params[$i])) {
-					DBD::Teradata::impl::setIndicator(\@indicvec, $i);
-					if (($$ptypes[$i] eq DBI::SQL_VARCHAR) ||
-						($$ptypes[$i] eq DBI::SQL_VARBINARY)) {
-						$indicdata .= pack('S', 0);
-					}
-					elsif (($$ptypes[$i] eq DBI::SQL_CHAR) ||
-						($$ptypes[$i] eq DBI::SQL_BINARY)) {
-						$indicdata .= pack("A$$plens[$i]", '');
-					}
-					elsif ($$ptypes[$i] eq DBI::SQL_DECIMAL) {
-						my $decsz = 8;
-						my $prec = int($$plens[$i]/256);
-						if ($prec <= 2) {
-							$decsz = 1;
+					if (!defined($p)) {
+						DBD::Teradata::impl::setIndicator(\@indicvec, $i);
+						if (($$ptypes[$i] eq DBI::SQL_VARCHAR) ||
+							($$ptypes[$i] eq DBI::SQL_VARBINARY)) {
+							$indicdata .= pack('S', 0);
 						}
-						elsif ($prec <=  4) {
-							$decsz = 2;
+						elsif (($$ptypes[$i] eq DBI::SQL_CHAR) ||
+							($$ptypes[$i] eq DBI::SQL_BINARY)) {
+							$indicdata .= pack("A$$plens[$i]", '');
 						}
-						elsif ($prec <=  9) {
-							$decsz = 4;
+						elsif ($$ptypes[$i] eq DBI::SQL_DECIMAL) {
+							my $decsz = 8;
+							my $prec = int($$plens[$i]/256);
+							if ($prec <= 2) {
+								$decsz = 1;
+							}
+							elsif ($prec <=  4) {
+								$decsz = 2;
+							}
+							elsif ($prec <=  9) {
+								$decsz = 4;
+							}
+							$indicdata .= pack("A$decsz", '');
 						}
-						$indicdata .= pack("A$decsz", '');
+						else {	 # everything else
+							$indicdata .= pack($ppackstr{$$ptypes[$i]}, 0);
+						}
+						next;
 					}
-					else {	 # everything else
-						$indicdata .= pack($ppackstr{$$ptypes[$i]}, 0);
-					}
-					next;
-				}
 #
 #	else load the data
 #
-				if (($$ptypes[$i] eq DBI::SQL_VARCHAR) ||
-					($$ptypes[$i] eq DBI::SQL_VARBINARY)) {
-					$indicdata .= pack('Sa*', length($$params[$i]), $$params[$i]);
-				}
-				elsif (($$ptypes[$i] eq DBI::SQL_CHAR) ||
-					($$ptypes[$i] eq DBI::SQL_BINARY)) {
-					$indicdata .= pack("A$$plens[$i]", $$params[$i]);
-				}
-				elsif ($$ptypes[$i] eq DBI::SQL_DECIMAL) {
-					$indicdata .= DBD::Teradata::impl::cvt_flt2dec($$params[$i], 
-						int($$plens[$i]/256), int($$plens[$i]%256));
-				}
-				else {	 # everything else
-					$indicdata .= pack($ppackstr{$$ptypes[$i]}, $$params[$i]);
-				}
-			}	# end for
-			$indicdata = DBD::Teradata::impl::cvtIndics(\@indicvec) . $indicdata;
-			$rawmode = 'IndicatorMode';
-		} # end if not raw mode
-		else {
+					if (($$ptypes[$i] eq DBI::SQL_VARCHAR) ||
+						($$ptypes[$i] eq DBI::SQL_VARBINARY)) {
+						$indicdata .= pack('Sa*', length($p), $p);
+					}
+					elsif (($$ptypes[$i] eq DBI::SQL_CHAR) ||
+						($$ptypes[$i] eq DBI::SQL_BINARY)) {
+						$indicdata .= pack("A$$plens[$i]", $p);
+					}
+					elsif ($$ptypes[$i] eq DBI::SQL_DECIMAL) {
+						$indicdata .= DBD::Teradata::impl::cvt_flt2dec($p, 
+							int($$plens[$i]/256), int($$plens[$i]%256));
+					}
+					else {	 # everything else
+						$indicdata .= pack($ppackstr{$$ptypes[$i]}, $p);
+					}
+				}	# end for
+				$indicdata = DBD::Teradata::impl::cvtIndics(\@indicvec) . $indicdata;
+				$rawmode = 'IndicatorMode';
+			} # end if not raw mode
+			else {
 #
-#	trim the length prefix and newline suffix
+#	rawmode: trim the length prefix and newline suffix
+#	adjust for param arrays
 #
-			$indicdata = $$params[0];
-			$indicdata = substr($indicdata, 2, length($indicdata) - 3);
-		}
-	}
-	
-	my $sessno = $sth->FETCH('tdat_sessno');
-	my $stmtno = 0;
+				my $p = $$params[0];
+				if (defined($p)) {
+					if (ref $p eq 'ARRAY') {
+						if (scalar(@$p) < $k) {
+							undef $p;
+						}
+						else {
+							$p = $$p[$k];
+						}
+					}
+					elsif (ref $p eq 'SCALAR') {
+						$p = $$p;
+					}
+				}
+				$indicdata = $p;
+				$indicdata = substr($indicdata, 2, length($indicdata) - 3);
+			}
+#
+#	fastload uses deferred transfer
+#
+			if ($dbh->FETCH('tdat_utility') eq 'FASTLOAD') {
+				if ((DBD::Teradata::impl::get_buf_len($sessno) + length($indicdata)) > 32000) {
+					$DBD::Teradata::err = -1;
+					if ($maxparmlen > 1) {
+						$DBD::Teradata::errstr = "Message buffer overflow at row $k; reduce parameter array size(s), then resubmit.";
+						$DBD::Teradata::impl::sesinxact{$sessno} = 0;
+						DBD::Teradata::impl::clear_buf($sessno);
+					}
+					else {
+						$DBD::Teradata::errstr = "Message buffer overflow; commit, then resubmit.";
+					}
+					return undef;
+				}
+				$DBD::Teradata::impl::sesinxact{$sessno} = 1;
+				DBD::Teradata::impl::append_buf($sessno, $rawmode, $indicdata);
+				next;
+			}
+		} # end for each param array element
+	} # end if params
 
-	my $dbh = $DBD::Teradata::connections{$sessno};
-	if ((!$dbh->FETCH('AutoCommit')) && ($DBD::Teradata::impl::sesinxact{$sessno} == 0)) {
+	if ($dbh->FETCH('tdat_utility') eq 'FASTLOAD') {
+		$sth->STORE('tdat_stmt_num' => 1);
+		return $maxparmlen;
+	}
+#
+#	not fastload, just send it
+#	in future we may perform multiple executions for param-array data
+#
+	if (($dbh->FETCH('tdat_utility') eq 'DBC/SQL') && (!$dbh->FETCH('AutoCommit')) && 
+		($DBD::Teradata::impl::sesinxact{$sessno} == 0)) {
 		DBD::Teradata::impl::tddo($sessno, 'BT;');
 		$DBD::Teradata::impl::sesinxact{$sessno} = 1;
 	}
+	
 	my $rowcnt = DBD::Teradata::impl::execute( $sessno, 
 		$sth->FETCH('Statement'), $datainfo, $indicdata, 
 		$sth->FETCH('tdat_nowait'),
 		$sth->FETCH('tdat_stmt_info'),
-		\$stmtno, $rawmode);
+		\$stmtno, $rawmode, $sth->FETCH('tdat_keepresp'), $sth);
+		
+	$sth->STORE('tdat_stmt_num', $stmtno);
+	$sth->STORE('tdat_rows', $rowcnt);
 	if (!defined($rowcnt)) {
 		$DBD::Teradata::err = DBD::Teradata::impl::err($sessno);
 		$DBD::Teradata::errstr = DBD::Teradata::impl::errstr($sessno);
+		return undef;
 	}
-	$sth->STORE('tdat_stmt_num' => $stmtno);
-	return $rowcnt;
+
+	return (($rowcnt == 0) ? -1 : $rowcnt);
 }
 
 sub Realize {
@@ -3107,23 +3514,28 @@ sub fetch {
 	my $nowait = $sth->FETCH('tdat_nowait');
 	my $stmtinfo = $sth->FETCH('tdat_stmt_info');
 	my $rawmode = $sth->FETCH('tdat_raw');
+	my $colary = $sth->FETCH('tdat_colary');
+	my $maxlen = $sth->FETCH('tdat_maxcolary');
+	my $data = '';
+	my @tmpary = ();
+	my $ary = (defined($colary) ? (($rawmode) ? $$colary[1] : \@tmpary) : undef);
 
-	my $data = DBD::Teradata::impl::fetch($sessno,
-		$nowait, $stmtinfo, \$stmtno);
+	my $rc = DBD::Teradata::impl::fetch($sessno,
+		$nowait, $stmtinfo, \$stmtno, $ary, $maxlen, \$data, $sth);
 	$sth->STORE('tdat_stmt_num' => $stmtno);
-	if (!defined($data)) { 
+	if (!defined($rc)) { 
 		$DBD::Teradata::err = DBD::Teradata::impl::err($sessno);
 		$DBD::Teradata::errstr = DBD::Teradata::impl::errstr($sessno);
 		return undef;
 	}
-	if ($data eq '') {
-		return undef;
+	if ($rc <= 0) {
+		return $rc;
 	}
 
-	my $stmthash = $$stmtinfo[$stmtno];
 	my $ftypes = $sth->{'TYPE'};
 	my $fprec = $sth->{'PRECISION'};
 	my $fscale = $sth->{'SCALE'};
+	my $stmthash = $$stmtinfo[$stmtno];
 	my $actends = $$stmthash{'EndsAt'};
 	my $actstarts = $$stmthash{'StartsAt'};
 	my $actsumstarts = $$stmthash{'SummaryStarts'};
@@ -3134,15 +3546,18 @@ sub fetch {
 		$actends - $actstarts + 1;
 
 	my $ibytes = DBD::Teradata::impl::indicSize($numflds);
-
-	my @row = [];
-
 #
 #	to fake out DBI, we need to backfill the extra row fields with undef
 #
-	for (my $i = 0; $i < scalar(@$ftypes); $i++) { $row[$i] = undef; }
+	my @row = (undef) x ($sth->{NUM_OF_FIELDS});
 		
 	if (defined($rawmode)) {
+		if (defined($colary)) {
+#
+#	return NULL row for array-bound columns
+#
+			return $sth->_set_fbav(\@row);
+		}
 		if ($rawmode eq 'RecordMode') {
 #
 #	trim off the indicators
@@ -3155,100 +3570,101 @@ sub fetch {
 		$row[0] = pack("S a* c", length($data), $data, 10);
 		return $sth->_set_fbav(\@row);
 	}
-
+	
 	my $indstr = substr($data, 0, $ibytes);
 	my @indics = DBD::Teradata::impl::getIndics($indstr);
 	$data = substr($data, $ibytes);
-	my $i;
+
 	my $fpos = (defined($issum)) ? $$actsumstarts[$issum] : $actstarts;
-	for (my $i = 0; $i < $numflds; $i++, $fpos++) {
-		my $ibit = DBD::Teradata::impl::isIndicSet(\@indics, $i);
-		$row[$fpos] = undef; 
-		if (($$ftypes[$fpos] eq DBI::SQL_VARCHAR) || 
-			($$ftypes[$fpos] eq DBI::SQL_VARBINARY) ||
-			($$ftypes[$fpos] eq DBI::SQL_LONGVARBINARY)) {
-			my $flen = unpack("S", $data); 
-			$data = substr($data, 2);
-			if ($flen == 0) { 
-				next; 
-			}
-			if (!$ibit) {
-				$row[$fpos] = unpack("a$flen", $data);
-				if (defined($sth->FETCH('ChopBlanks')) && 
-					($sth->FETCH('ChopBlanks') != 0)) {
-					$row[$fpos] =~ s/\s+$//;
+	if (!defined($colary)) {
+		$tmpary[0] = $data;
+	}
+	my $loopcnt = (defined($ary) ? scalar(@$ary) : 1);
+	for (my $k = 0; $k < $loopcnt; $k++) {
+		$data = $tmpary[$k];
+		for (my $i = 0; $i < $numflds; $i++, $fpos++) {
+			my $ibit = DBD::Teradata::impl::isIndicSet(\@indics, $i);
+			$row[$fpos] = undef; 
+			if (($$ftypes[$fpos] eq DBI::SQL_VARCHAR) || 
+				($$ftypes[$fpos] eq DBI::SQL_VARBINARY) ||
+				($$ftypes[$fpos] eq DBI::SQL_LONGVARBINARY)) {
+				my $flen = unpack("S", $data); 
+				$data = substr($data, 2);
+				if (($flen != 0) && (!$ibit)) {
+					$row[$fpos] = unpack("a$flen", $data);
+					if (defined($sth->FETCH('ChopBlanks')) && 
+						($sth->FETCH('ChopBlanks') != 0)) {
+						$row[$fpos] =~ s/\s+$//;
+					}
 				}
-			}
-			if (length($data) > $flen) {
-				$data = substr($data, $flen);
-			}
-			else { $data = ''; }
-			next;
-		}
-		if (($$ftypes[$fpos] eq DBI::SQL_CHAR) || 
-			($$ftypes[$fpos] eq DBI::SQL_BINARY)) {
-			if (!$ibit) {
-				$row[$fpos] = unpack("a$$fprec[$fpos]", $data);
-				if (defined($sth->FETCH('ChopBlanks')) && 
-					($sth->FETCH('ChopBlanks') != 0)) {
-					$row[$fpos] =~ s/\s+$//;
+				if (length($data) > $flen) {
+					$data = substr($data, $flen);
 				}
+				else { $data = ''; }
 			}
-			if (length($data) > $$fprec[$fpos]) {
-				$data = substr($data, $$fprec[$fpos]);
+			elsif (($$ftypes[$fpos] eq DBI::SQL_CHAR) || 
+				($$ftypes[$fpos] eq DBI::SQL_BINARY)) {
+				if (!$ibit) {
+					$row[$fpos] = unpack("a$$fprec[$fpos]", $data);
+					if (defined($sth->FETCH('ChopBlanks')) && 
+						($sth->FETCH('ChopBlanks') != 0)) {
+						$row[$fpos] =~ s/\s+$//;
+					}
+				}
+				if (length($data) > $$fprec[$fpos]) {
+					$data = substr($data, $$fprec[$fpos]);
+				}
+				else { $data = ''; }
 			}
-			else { $data = ''; }
-			next;
-		}
-		if ($$ftypes[$fpos] eq DBI::SQL_FLOAT) {
-			if (!$ibit) {
-				$row[$fpos] = unpack("d", $data);
+			elsif ($$ftypes[$fpos] eq DBI::SQL_FLOAT) {
+				if (!$ibit) {
+					$row[$fpos] = unpack("d", $data);
+				}
+				$data = substr($data, 8);
 			}
-			$data = substr($data, 8);
-			next;
-		}
-		if ($$ftypes[$fpos] eq DBI::SQL_DECIMAL) {
-			if (!$ibit) {
-				$row[$fpos] = DBD::Teradata::impl::cvt_dec2flt($data, 
-					$$fprec[$fpos], $$fscale[$fpos]);
+			elsif ($$ftypes[$fpos] eq DBI::SQL_DECIMAL) {
+				if (!$ibit) {
+					$row[$fpos] = DBD::Teradata::impl::cvt_dec2flt($data, 
+						$$fprec[$fpos], $$fscale[$fpos]);
+				}
+				my $decsz = 8;
+				if ($$fprec[$fpos] <= 2) {
+					$decsz = 1;
+				}
+				elsif ($$fprec[$fpos] <=  4) {
+					$decsz = 2;
+				}
+				elsif ($$fprec[$fpos] <=  9) {
+					$decsz = 4;
+				}
+				$data = substr($data, $decsz);
 			}
-			my $decsz = 8;
-			if ($$fprec[$fpos] <= 2) {
-				$decsz = 1;
+			elsif (($$ftypes[$fpos] eq DBI::SQL_INTEGER) ||
+				($$ftypes[$fpos] eq DBI::SQL_DATE)) {
+				if (!$ibit) {
+					$row[$fpos] = unpack("l", $data);
+				}
+				$data = substr($data, 4);
 			}
-			elsif ($$fprec[$fpos] <=  4) {
-				$decsz = 2;
+			elsif ($$ftypes[$fpos] eq DBI::SQL_SMALLINT) {
+				if (!$ibit) {
+					$row[$fpos] = unpack("s", $data);
+				}
+				$data = substr($data, 2);
 			}
-			elsif ($$fprec[$fpos] <=  9) {
-				$decsz = 4;
+			elsif ($$ftypes[$fpos] eq DBI::SQL_TINYINT) {
+				if (!$ibit) {
+					$row[$fpos] = unpack("c", $data);
+				}
+				$data = substr($data, 1);
 			}
-			$data = substr($data, $decsz);
-			next;
-		}
-		if (($$ftypes[$fpos] eq DBI::SQL_INTEGER) ||
-			($$ftypes[$fpos] eq DBI::SQL_DATE)) {
-			if (!$ibit) {
-				$row[$fpos] = unpack("l", $data);
+			if (defined($$colary[$i])) {
+				$ary = $$colary[$i];
+				$$ary[$k] = $row[$fpos];
 			}
-			$data = substr($data, 4);
-			next;
-		}
-		if ($$ftypes[$fpos] eq DBI::SQL_SMALLINT) {
-			if (!$ibit) {
-				$row[$fpos] = unpack("s", $data);
-			}
-			$data = substr($data, 2);
-			next;
-		}
-		if ($$ftypes[$fpos] eq DBI::SQL_TINYINT) {
-			if (!$ibit) {
-				$row[$fpos] = unpack("c", $data);
-			}
-			$data = substr($data, 1);
-			next;
 		}
 	}
-
+#	$sth->STORE('NUM_OF_FIELDS' => $numflds);
 	return $sth->_set_fbav(\@row);
 }
 *fetchrow_arrayref = \&fetch;
@@ -3298,14 +3714,93 @@ sub err {
 	return DBD::Teradata::impl::err($sessno);
 }
 
+sub ProcDataInfo {	# processes DATAINFO parcels on the fly
+	my ($sth, $pcl, $stmtno) = @_;
+	my $flds = unpack('S', $pcl);
+	$pcl = substr($pcl, 2);
+	$flds *= 2;
+	my $descr = "S$flds";
+	$flds /= 2;
+	my @diflds = unpack($descr, $pcl);
+
+	my @fname = ();		# fieldnames
+	my @fname_uc = ();	# uppercase
+	my @fname_lc = ();	# lowercase
+	my @ftype = ();		# field type
+	my @ftitle = ();		# field titles
+	my @fformat = ();		# field formats
+	my @fprec = ();		# field precision/length
+	my @fscale = ();	# field scale (DECIMAL type only)
+	my @fnullable = ();	# is field nullable
+
+	my $i = 0;	
+	for ($i = 0; $i < $flds; $i++) {
+		if (!defined($ptypemap{($diflds[($i * 2)] & $tdat_NULL_MASK)})) {
+			last;
+		}
+		$ftype[$i] = $ptypemap{($diflds[($i * 2)] & $tdat_NULL_MASK)};
+		$fnullable[$i] = ($diflds[($i * 2)] & 1);
+		my $len = $diflds[(($i * 2)+1)];
+		if ($ftype[$i] == DBI::SQL_DECIMAL) {
+			$fprec[$i] = int($len/256);
+			$fscale[$i] = $len%256;
+		}
+		else { 
+			$fprec[$i] = $len;
+			$fscale[$i] = 0; 
+		}
+		$fname[$i] = '';
+		$fname_uc[$i] = '';
+		$fname_lc[$i] = '';
+		$ftitle[$i] = '';
+		$fformat[$i] = '';
+	}
+
+	$sth->{NAME} = \@fname;
+	$sth->{NAME_lc} = \@fname_lc;
+	$sth->{NAME_uc} = \@fname_uc;
+	$sth->{TYPE} = \@ftype;
+	$sth->{PRECISION} = \@fprec;
+	$sth->{SCALE} = \@fscale;
+	$sth->{NULLABLE} = \@fnullable;
+	$sth->{tdat_TITLE} = \@ftitle;
+	$sth->{tdat_FORMAT} = \@fformat;
+	
+	my $stmtinfo = $sth->{tdat_stmt_info};
+	$$stmtinfo[$stmtno] = {
+		ActivityType => "PMPC",
+		ActivityCount => 0,
+		Warning => undef,
+		StartsAt => 0,
+		EndsAt => ($i-1),
+		IsSummary => undef,
+		SummaryStarts => undef,
+		SummaryEnds => undef
+	};
+
+	return 1;
+}
+
 1;
-
+}
 __END__
-
 
 =head1 NAME
 
 DBD::Teradata - a DBI driver for Teradata
+
+=head1 SYNOPSIS
+
+  use DBI;
+
+  $dbh = DBI->connect('dbi:Teradata:hostname', 'user', 'password');
+
+See L<DBI> for more information.
+
+=head1 DESCRIPTION
+
+Refer to the included tdatdbd.html, or 
+http://home.earthlink.net/~darnold/tdatdbd.html for detailed information.
 
 =head2 *** *BEFORE* BUILDING, TESTING AND INSTALLING this you will need to:
 
@@ -3372,6 +3867,22 @@ DBD::Teradata - a DBI driver for Teradata
 
     Please see the following files for more information:
     	tdatdbd.html - the User's Guide
+    	
+=head2 *** CHANGE HISTORY
+
+	Release 1.11	Dec 10, 2000
+	
+		- added tdat_lsn, tdat_clone, tdat_keepresp, and tdat_utility attributes
+		- added support for FASTLOAD, EXPORT, and MONITOR utility sessions
+		- added bind_param_inout() function
+		- added BindParamArray(), BindColArray(), and FirstAvailList() 
+			driver-specific function
+		- fixed sth->rows(), and improved dbh->do() behavior
+		- improved error reporting on failed DBI->connect() calls
+
+	Release 1.10	Nov 12, 2000
+	
+		- first official CPAN release
 
 =head2 *** MAILING LISTS
 

@@ -1,5 +1,5 @@
 <html><body>
-<i>Last updated November 12, 2000</i><p>
+<i>Last updated December 10, 2000</i><p>
 <h2>NAME</h2><p>
 <h3>
 DBD::Teradata - Perl DBI Driver for Teradata</h3><p>
@@ -18,6 +18,11 @@ DBD::Teradata - Perl DBI Driver for Teradata</h3><p>
 <li><a href="#mstmts">MULTI-STATEMENT AND MACRO REQUESTS</a>
 <li><a href="#sumsel">SUMMARIZED SELECT REQUESTS</a>
 <li><a href="#utilsupp">UTILITY SUPPORT</a>
+<ul>
+<li><a href="#fastload">FASTLOAD</a>
+<li><a href="#fastexp">FASTEXPORT</a>
+<li><a href="#pmpc">PM/PC</a>
+</ul>
 <li><a href="#dblbuf">DOUBLE BUFFERING</a>
 <li><a href="#errors">ERROR HANDLING</a>
 <li><a href="#diags">DIAGNOSTICS</a>
@@ -27,8 +32,19 @@ DBD::Teradata - Perl DBI Driver for Teradata</h3><p>
 <li><a href="#stnum">tdat_stmt_num</a>
 <li><a href="#stinfo">tdat_stmt_info</a>
 <li><a href="#ttlfmt">tdat_TITLE, tdat_FORMAT</a>
+<li><a href="#lsn">tdat_lsn</a>
+<li><a href="#utility">tdat_utility</a>
+<li><a href="#clone">tdat_clone</a>
+<li><a href="#keepresp">tdat_keepresp</a>
 </ul>
 <li><a href="#funcs">DRIVER-SPECIFIC FUNCTIONS</a>
+<ul>
+<li><a href="#bindpary">BindParamArray</a>
+<li><a href="#bindcary">BindColArray</a>
+<li><a href="#first">FirstAvailable</a>
+<li><a href="#firstlist">FirstAvailList</a>
+<li><a href="#realize">Realize</a>
+</ul>
 </ul>
 <li><a href="#conform">CONFORMANCE</a>
 <li><a href="#platforms">SUPPORTED PLATFORMS</a>
@@ -68,14 +84,27 @@ for updates and support.<p>
 interface libraries, other than the standard DBI package.
 <p>
 
-The package is now available on <a href="www.cpan.org">CPAN</a>.
+The package is now available on <a href="http://cpan.valueclick.com/modules/by-category/07_Database_Interfaces/DBD/">CPAN</a>.
 <a name="version"></a>
 <h2>CURRENT VERSION</h2><p>
 
-Release 1.10
+Release 1.11
 <a name="history"></a>
 <h2>CHANGE HISTORY</h2><p>
 
+Release 1.11:<p>
+<ul>
+<li>HP-UX has now been successfully tested.</li>
+<li>FreeBSD (on Intel) has now been successfully tested.</li>
+<li>removed extraneous code deprecated by Perl 5.6.0</li>
+<li>added tdat_lsn, tdat_clone, tdat_keepresp, and tdat_utility attributes</li>
+<li>added support for FASTLOAD, EXPORT, and MONITOR utility sessions</li>
+<li>added bind_param_inout() function</li>
+<li>added BindParamArray(), BindColArray(), and FirstAvailList() driver-specific function</li>
+<li>fixed sth->rows(), and improved dbh->do() behavior</li>
+<li>improved error reporting on failed DBI->connect() calls</li>
+</ul>
+<p>
 Release 1.10:<p>
 <ul>
 <li>added nonblocking session support (FirstAvailable, Realize driver-specific functions)</li>
@@ -119,7 +148,6 @@ You should either use the
 full explicit hostname (e.g., "DBCCOP1"), the numeric IP address (e.g.,
 "1.2.3.4"), create an alias for the explicit hostname, or, better still,
 use <b>bind(3)</b> the way God intended.<p>
-RunStartup execution is not supported.<p>
 <a name="cst"></a>
 <h3>CONNECTIONS, SESSIONS AND TRANSACTIONS</h3><p>
 
@@ -130,12 +158,13 @@ Large scale multisession applications should use <b>fork()</b> early
 and often to permit more than 10 or 20 sessions to execute concurrently.<p>
 
 Currently, the driver operates in Teradata mode (i.e., *not* ANSI mode).
-
 That means that DDL statements and multistatement requests implicitly finish a transaction,
 and AUTOCOMMIT is the default. We don't flag any non-ANSI SQL, either.
-See the <a href="http://www.info.ncr.com">Teradata SQL documents</a>
+See the <a href="http://www.info.ncr.com/sd/index2.htm">Teradata SQL documents</a>
 for all the differences between ANSI and Teradata behavior.
 Eventually, support for selecting a session mode may be added.<p>
+
+RunStartup execution is not supported.<p>
 
 Cursor SQL syntax (i.e., <code>...WHERE CURRENT OF...</code>) is not supported.<p>
 
@@ -157,7 +186,7 @@ to the password string, e.g.,<br>
 </pre>
 
 HELP statements are not supported, due to an apparent bug in the data returned by the DBMS in 
-RECORD mode.
+RECORD mode.<p>
 
 <a name="types"></a>
 <h3>DATA TYPES</h3><p>
@@ -276,7 +305,9 @@ purposes of this discussion, the Teradata definitions of request and statement w
 used; when refering to DBI's definition of a statement, the term "DBI statement" will
 be used). 
 <code>tdat_stmt_info</code> returns an arrayref of hashrefs. Each array entry
-is indexed by its associated statement number within a Teradata request.
+is indexed by its associated statement number within a Teradata request. <b>Please note 
+that the DBMS starts statement numbering with 1, not zero; thus, loop constructs
+used to scan the statement info array should start their index values at 1.</b>
 The hashref has several keys, described in the following sections and in the
 <a href="#specattr"><b>DRIVER-SPECIFIC ATTRIBUTES</b></a> section.<p>
 
@@ -457,10 +488,169 @@ important Teradata features. Besides, you can always ignore the summary stuff if
 
 <a name="utilsupp"></a>
 <h3>UTILITY SUPPORT</h3><p>
-Some support for fastload and fastexport may eventually be implemented.
-Support for these utility interfaces should be useful for large-scale ETL pipelines,
-or just simply importing/exporting directly from/to other database systems.<p>
+<i><b>Updated 12/10/2000</b></i><br>
+Support for FASTLOAD, FASTEXPORT, and PM/PC has been added as of release 1.11. 
+<i><b>NOTE: These features expose very fragile aspects of the DBMS.</b></i> Applications
+using this functionality should be rigorously tested against non-production systems
+before deployment. I am providing rudimentary <b>tdfload.pl</b> and <b>tdfexp.pl</b>
+scripts, which emulate their CLI-based counterparts (in very limited fashion) and 
+which should be adequate for basic operations, or at least provide a codebase to 
+build upon for more complex applications. Additionally,
+a <b>tdpmpc.pl</b> script is provided to illustrate how to write PM/PC 
+applications via DBD::Teradata.<p>
 
+<a name="fastload"></a>
+<h4>FASTLOAD</h4>
+To use FASTLOAD from this driver:<p>
+<ol>
+<li>logon a control session with the <a href="#lsn">tdat_lsn</a> set to zero, and NO <a href="#utility">tdat_utility</a> specified.
+<li>logon a error session with the <a href="#lsn">tdat_lsn</a> set to zero, and NO <a href="#utility">tdat_utility</a> specified.
+<li>retrieve the LSN of the control session via $controldbh-&gt;{'tdat_lsn'}.
+<li>logon N fastload sessions, specifying the control session's LSN value for tdat_lsn, and 'FASTLOAD' for tdat_utility.
+<li>prepare an USING (name type, ...) INSERT INTO table VALUES(:name, ...) on the control session. 
+<b>NOTE:</b> Placeholder (i.e., '?' parameters) are not allowed.
+<li>prepare a statement on each fastload session:
+<ul>
+<li>if using tdat_raw mode, an empty statement may be prepared (e.g., $dbh-&gt;(';') ).
+<li>otherwise, use the INSERT statement previously prepared on the control session in order to
+provide parameter datatype information to the fastload session.
+</ul>
+<li>perform a do('BEGIN LOADING &lt;tablename&gt; CHECKPOINT... ERRTABLES ...') on the control handle
+<li>execute() the control session's INSERT statement. <b>Note:</b> Do not bind parameter values to the
+control session; data should be bound ONLY to the fastload sessions.
+<li>for each fastload session's statement handle:
+<ul>
+<li>perform a bind_param() as needed to supply a row for insert (not necessarily tdat_raw mode)<br>
+Alternately, the data can be provided directly in the execute() call.
+<li>execute() the fastload session's statement.
+<li>repeat the bind()/execute() until sufficient data has been supplied for transfer to the DBMS.<br>
+The maximum amount of data which can be transfered per message to the DBMS is 32000 bytes. To
+determine how much data has been accumulated, add 4 to the size of each data row bound to a
+fastload session.
+<li>when enough data has been bound to the session, perform a commit() on the fastload
+session database handle to initiate the transfer to the DBMS.
+</ul>
+Alternately, the statement-specific function <a href="#bindpary">BindParamArray()</a> can be used
+to bind an entire array of rows in a single call.
+<li>repeat these steps for each fastload session until either all data has been moved,
+or the defined CHECKPOINT interval has been met.
+<li>using the array of fastload connection handles, call the <a href="#firstlist">FirstAvailList</a>
+driver specific function to get the sessions which have completed their last request.
+<li>for each completed session, execute the <a href="#realize">Realize</a> statement specific function,
+and submit a new set of rows.
+<li>repeat until CHECKPOINT number of rows has been dispatched, then wait for
+all pending connections to report completion via FirstAvailList/Realize.
+<li>perform a commit() on the control connection handle
+<li>repeat steps 9 thru 14 until all rows loaded.
+<li>perform do('CHECKPOINT LOADING END') on the control connection handle
+<li>perform do('END LOADING') on the control connection handle
+<li>logoff each fastload session, then the error session.
+<li>select the rowcounts from the errortables via the control session,
+and optionally report them to the user.
+<li>Optional: insert/update progress indications into system
+fastload log via the error session handle.
+</ol>
+<p>
+The accompanying <b>tdfload.pl</b> script is a simple (very limited) emulator of the
+fastload client utility. It can process simple fastload command scripts to load a table
+from a file. Review <b>tdfload.pl</b> for a better understanding of how DBD::Teradata
+supports FASTLOAD.<p>
+
+<a name="fastexp"></a>
+<h4>FASTEXPORT</h4>
+To use FASTEXPORT from this driver:<p>
+<ol>
+<li>logon a control session with the <a href="#lsn">tdat_lsn</a> set to zero, and NO 
+<a href="#utility">tdat_utility</a> specified.
+<li>create a logtable to be used by the DBMS to control execution of the fastexport.
+<li>logon an error session with the <a href="#lsn">tdat_lsn</a> set to zero, 
+and NO <a href="#utility">tdat_utility</a> specified.
+<li>retrieve the LSN of the control session via the tdat_lsn connection attribute.
+<li>logon N fastexport sessions with the <a href="#lsn">tdat_lsn</a> set to the LSN of the
+control session, and <a href="#utility">tdat_utility</a> set to 'EXPORT'.
+<li>execute 'SELECT NULL FROM ....' from the logtable.
+<li>execute 'SELECT .... FROM logtable WHERE ....' on the error session.
+<li>execute 'SELECT .... FROM logtable WHERE ....' on the error session.
+<li>execute 'INSERT INTO logtable (LogType, Seq) VALUES(220, 1)' on the error session.
+<li>prepare the query to be exported on the control session, setting the 
+<a href="#keepresp">tdat_keepresp</a> attribute to 1.
+<li>prepare an empty query (';') on each EXPORT session, setting the <a href="#clone">tdat_clone</a>
+attribute to the statement handle of the query previously prepared on the control session.
+<li>execute the export query on the control session.
+<li>use bind_param_inout() to bind 2 integer variables to each EXPORT session; the first will always be
+set to 1, and the second will be set to the sequence number of the response data block the session
+will be fetching.
+<li>bind an array to each EXPORT session's statement handle via the <a href="#bindcary">BindColArray</a>
+function.
+<li>execute each EXPORT session's statement.
+<li>use <a href="#firstlist">FirstAvailList</a> to wait for sessions to return their data,
+then call <a href="#realize">Realize</a> to realize the results.
+<li>call fetch() on each returned session to instantiate the bound column arrays
+<li>use the returned data as needed
+<li>repeat steps 14 thru 17, incrementing the sequence number before each execution, until fetch()
+returns undef on each session.
+<li>after all the data has been fetched, execute a 'END EXPORT' on the control
+session, and then commit the control session.
+<li>logoff the error session, then the EXPORT sessions, and finally the control
+session.
+<li>logon a new session and DROP TABLE on the logtable.
+</ol><p>
+<b><i>NOTE:</i></b> To date, only basic FASTEXPORT operations have been tested.
+Parameterized queries, error handling, and recovery after failure/restart all
+remain to be tested. In addition, performance is far from optimal at this point,
+and will be addressed in a future performance-enhancement release.<p>
+The accompanying <b>tdfexp.pl</b> script is a simple (very limited) emulator of the
+fexp client utility. It can process simple fexp command scripts to export a table
+to a file. Review <b>tdfexp.pl</b> for a better understanding of how DBD::Teradata
+supports FASTEXPORT.<p>
+
+<a name="pmpc"></a>
+<h4>PM/PC</h4>
+To use PM/PC from this driver:
+<ol>
+<li>logon a session with AutoCommit set to 0, and tdat_utility set to 'MONITOR'
+<li>prepare each PM/PC statement you intend to use. <b>NOTE:</b>the TYPE, PRECISION,
+SCALE, and NULLABLE attributes, as well as the tdat_stmt_info information, will not
+be valid until <b>after the statement is executed</b>. Also note that the NAME,
+tdat_TITLE, and tdat_FORMAT attributes will <b>always</b> return zero-length strings
+(even after statement execution), since that information is not provided by the DBMS.
+<li>call bind_param() to bind any parameters for whichever statement you intend
+to execute. <b>NOTE:</b> datatype information <b><i>must</i></b> be provided
+when binding the parameters -even when specifying NULL parameter values- , 
+since the value types must precisely match the
+requirements of the PM/PC statement. Unfortunately, PM/PC statements do 
+not include any USING clause or placeholder syntax, so prepare() cannot 
+determine the precise type of the required parameters internally.<br>
+Alternately, the statements can be prepared in tdat_raw mode, in which
+case the application is responsible for properly pack()'ing the parameters
+into a single VARBINARY variable, which is bound as a single SQL_VARBINARY 
+parameter.
+<li>execute the desired statement.
+<li>use fetchrow_array() to collect the returned row data. <b>NOTE:</b>
+Since PM/PC statements cannot be formally prepared, the <code><b>NAME, TYPE,
+PRECISION,</b></code> etc. attributes cannot be queried until the statement
+is actually executed. Furthermore, the number of returned fields can't be determined;
+therefore, the NUM_OF_FIELDS attribute is set to 255. 
+<li>check the <code><b>tdat_stmt_num</b></code> attribute; if the statement number
+has changed snice the last fetch(), refresh the various type indications and
+control variables from the <code>TYPE, PRECISION, SCALE, and NULLABLE</code> attributes,
+and determine the number of valid fields from the <code>StartsAt and EndsAt</code>
+attributes of the current statement's tdat_stmt_info hash entry. <b>NOTE:</b>Most PM/PC 
+requests actually behave as multi-statement requests; however, since DBD::Teradata 
+cannot fully prepare the request statement, each "sub-statement's" hash in the
+tdat_stmt_info array is not generated until its results begin to be received.
+The net effect is that the application must check the tdat_stmt_num attribute
+after each fetchrow_array() call to determine if the returned column types,
+precisions, scales, etc. have changed. 
+<li>process the returned data as needed.
+<li>repeat as needed, or simply logoff when done.
+</ol><p>
+As the preceding indcates, PM/PC support requires some careful processing.
+Review the <a href="http://www.info.ncr.com/sd/index2.htm">Teradata RDBMS 
+Performance Monitor Reference</a> document and the <b>tdpmpc.pl</b> script included
+in the DBD::Teradata installation package for a better understanding of how to
+write PM/PC applications.<p>
+<p>
 <a name="dblbuf"></a>
 <h3>DOUBLE BUFFERING</h3><p>
 
@@ -506,8 +696,8 @@ using dummy data.
 
 <a name="specattr"></a>
 <h3> DRIVER-SPECIFIC ATTRIBUTES</h3><p>
-There are some additional attributes that the user can query a 
-statement handle for:<p>
+There are some additional attributes that the user can either supply to
+various DBI calls, or query on database or statement handles:<p>
 
 <ul>
 <a name="raw"></a>
@@ -559,7 +749,10 @@ value is the total number of statements executed by the request.<p>
 
 <i>Read-only on statement handle.</i><br>
 Returns an arrayref of hashrefs of Teradata statement information for each Teradata statement 
-within the request associated with the DBI statement handle.
+within the request associated with the DBI statement handle. Not valid on EXPORT or PM/PC sessions.<br>
+<b>Please note 
+that the DBMS starts statement numbering with 1, not zero; thus, loop constructs
+used to scan the statement info array should start their index values at 1.</b>
 The following attributes are included in each statement's hashref:<p>
 <ul>
 <li><code><b>ActivityType</b></code> - indicates the type of activity ('Select', 'Insert', 'Update', etc.)
@@ -652,12 +845,78 @@ for ($i = 0; $i &lt; $stmtcnt; $i++) {
 <i>Read-only on statement handle.</i><br>
 Returns arrayref's of field title and format information (e.g., from (TITLE...) and (FORMAT ...)
 clauses on SELECT or table/view specifications), ala the NAME, TYPE, PRECISION, etc. attributes.</li><p>
+
+<a name="lsn"></a>
+<li> tdat_lsn<p>
+<i>Write-only connect() attribute, Read-only on connection handle.</i><br>
+When specified on connect():
+<ul>
+<li>if specified with a value of zero, causes the session to allocate an LSN from the DBMS,
+which can be queried after successful connection using the tdat_lsn attribute.
+<li>if specified with a non-zero value, causes the session to associate with the provided
+LSN value.
+</ul>
+If not specified during connect(), no LSN action is performed, and querying tdat_lsn after 
+connection will return <code>undef</code>.
+
+After connect(), the LSN value can be queried via the database handle tdat_lsn attribute.</li>
+<p>
+<a name="utility"></a>
+<li>tdat_utility<p>
+<i>Write-only connect() attribute, Read-only on connection handle.</i><br>
+When specified on connect(), the specified string is used as the logon partition for
+the session. If not specified, the default value is 'DBC/SQL'. Valid values
+are 'DBC/SQL', 'FASTLOAD', and 'EXPORT'.</li><p>
+<a name="clone"></a>
+<li>tdat_clone<p>
+<i>Write-only prepare() attribute.</i><br>
+When set to a valid statement handle during prepare(), causes the new statement context
+to duplicate the context of the provided statement handle.
+This is currently only useful when preparing the empty statements on EXPORT sessions, so they
+can duplicate the various <code><b>NAME, TYPE, PRECISION,</b></code> etc. attributes of the
+<code>SELECT</code> statement previously prepared on the control session.</li><p>
+<a name="keepresp"></a>
+<li>tdat_keepresp<p>
+<i>Write-only prepare() attribute.</i><br>
+When set to a non-zero value, causes a KEEPRESP parcel to be issued with the request to the
+DBMS. This is currently only useful when executing the EXPORT'd query on the control session of a
+fastexport, though it could eventually be used to support answerset rewinds.
 </ul>
 <p>
 
 <a name="funcs"></a>
 <h3> DRIVER-SPECIFIC FUNCTIONS</h3><p>
 
+<ul>
+<a name="bindpary"></a>
+<li><code>$i = $sth->func(@param_list, BindParamArray);</code><p>
+
+$param_list[0] is the number of the parameter to be bound, and $param_list[1] is an arrayref
+that will contain the parameter values. Values need not be instantiated until just prior to
+the execute() call.
+<ul>
+<li>Upon execute, the prepared statement is executed for each bound parameter array value, <b>OR</b>,
+for FASTLOAD operations, the entire set of parameter values is supplied to the DBMS in a single
+request.
+<li>For statements with multiple parameters, any bound parameter arrays with fewer elements
+than the longest bound parameter array will cause a NULL value to be used for the unsupplied
+parameter array elements.
+<li>If some parameters are bound to scalar values, the scalar value will be used for each
+statement execution or FASTLOAD row.
+<li>For FASTLOAD applications, if the total set of bound parameter array values exceeds the
+maximum request message size, an error is returned requesting the user reduce the number of
+parameter array values.
+</ul>
+</li><p>
+
+<a name="bindcary"></a>
+<li><code>$i = $sth->func(@param_list, BindColArray);</code><p>
+
+$param_list[0] is the number of the column to be bound, $param_list[1] is an arrayref
+that will receive the column values, and $param_list[2] is the maximum number of rows the
+application expects to be returned per fetch().<br>
+This function allows a single fetch() operation to return multiple rows of data.
+</li></ul><p>
 In order to make this driver useful for high-performance ETL
 applications, support for multiple concurrent sessions is needed.
 Unfortunately, native DBI doesn't currently support the type
@@ -665,10 +924,9 @@ of asynchronous session interaction needed to efficiently
 move data to/from a MPP database system (hopefully, when
 Perl is more thread safe, DBI will remove its current
 single thread per DBD mutex restriction, and this special
-function won't be needed). To address this need, a "FirstAvailable"
-and "Realize" function have been provided.<p>
-
+function won't be needed). To address this need, the following functions have been provided:<p>
 <ul>
+<a name="first"></a>
 <li><code>$i = $drh->func(@param_list, FirstAvailable);</code><p>
 
 $param_list[0] is an arrayref of database handles, and $param_list[1] is a timeout specification
@@ -676,15 +934,31 @@ $param_list[0] is an arrayref of database handles, and $param_list[1] is a timeo
 within the supplied database handle array that is ready to be serviced. If none of the
 sessions is ready for service, it waits up to the timeout
 number of seconds (or forever if timeout is -1 or undef) for a session
-to become ready.</li><p>
+to become ready. Returns <code>undef</code> if no sessions are ready in the specified timeout.</li><p>
 
+<a name="firstlist"></a>
+<li><code>@ary = $drh->func(@param_list, FirstAvailList);</code><p>
+
+$param_list[0] is an arrayref of database handles, and $param_list[1] is a timeout specification
+(in seconds, -1 or undef indicate infinite wait). Returns an array of indexes of sessions
+within the supplied database handle array that are ready to be serviced. If none of the
+sessions is ready for service, it waits up to the timeout
+number of seconds (or forever if timeout is -1 or undef) for a session
+to become ready. Returns <code>undef</code> if no sessions are ready in the specified timeout.<br>
+NOTE: This function is useful for more evenly distriubting the workload across multiple
+sessions when all sessions respond at nearly the same time. Using FirstAvailable() in that
+situation tends to favor the first 1 or 2 sessions in the list, thus underusing the remaining
+sessions.</li><p>
+
+<a name="realize"></a>
 <li><code>$i = $sth->func(undef, Realize);</code><p>
 
-Realizes the results of a non-blocking statement execution. <code>FirstAvailable</code>
-only waits for and reports that a session is ready; it does <b>not</b> process the results
-of the statement. <code>Realize</code> performs the actual processing of the database
+Realizes the results of a non-blocking statement execution. <code>FirstAvailable</code> and
+<code>FirstAvailList</code>
+only wait for and report that a session is ready; they do <b>not</b> process the results
+on the session. <code>Realize</code> performs the actual processing of the database
 response, including returning the success or failure of the operation, and any returned
-rows.</li><p>
+rows.</li>
 </ul>
 <b>WARNING:</b> This functionality relies on the <code>select()</code> system I/O call to determine
 sessions that have pending responses. Perl's implementation of <code>select()</code> limits the
@@ -741,7 +1015,8 @@ while (some statements still active) {
 	}
 	$sthlist[$i]-&gt;finish();
 }
-</pre></ul><p>
+</pre>
+</ul><p>
 
 <a name="conform"></a>
 <h2>CONFORMANCE</h2><p>
@@ -772,34 +1047,52 @@ tested to date.<br>
 	<th align=center>Hardware</th>
 	<th align=center>OS</th>
 	<th align=center>Perl Version</th>
+	<th align=center>DBD::Teradata<br>Version</th>
 </tr><tr>
 	<td align=center>Intel/AMD PC</td>
 	<td align=center>Win98</td>
 	<td align=center>5.005<br>(ActivePerl)</td>
+	<td align=center>1.11</td>
 </tr><tr>
 	<td align=center>Intel PC</td>
 	<td align=center>WinNT 4.0 SP6</td>
 	<td align=center>5.6<br>(ActivePerl)</td>
+	<td align=center>1.11</td>
 </tr><tr>
 	<td align=center>Intel PC</td>
 	<td align=center>Linux</td>
 	<td align=center>5.??</td>
+	<td align=center>1.00</td>
 </tr><tr>
 	<td align=center>NCR 4XXX (Intel)</td>
 	<td align=center>MPRAS</td>
 	<td align=center>5.005</td>
+	<td align=center>1.10</td>
 </tr><tr>
 	<td align=center>iMac DV (PowerPC)</td>
 	<td align=center>LinuxPPC</td>
 	<td align=center>5.005</td>
+	<td align=center>1.11</td>
 </tr><tr>
 	<td align=center>Sun SPARC</td>
 	<td align=center>Solaris 4.3</td>
 	<td align=center>5.005</td>
+	<td align=center>1.10</td>
 </tr><tr>
 	<td align=center>IBM RS/6000</td>
 	<td align=center>AIX</td>
 	<td align=center>5.005</td>
+	<td align=center>1.10</td>
+</tr><tr>
+	<td align=center>HP 9000</td>
+	<td align=center>HP-UX 11.0</td>
+	<td align=center>5.6.0</td>
+	<td align=center>1.10</td>
+</tr><tr>
+	<td align=center>Intel PC</td>
+	<td align=center>FreeBSD 3.4-4.2</td>
+	<td align=center>5.6.0</td>
+	<td align=center>1.10</td>
 </table><br>
 <p>
 <a name="bugs"></a>
@@ -889,7 +1182,13 @@ tested to date.<br>
 	<td align=left>err() on database handles fails with undefined reference.</td>
 	<td align=center>Fixed</td>
 	<td align=center>1.10</td>
-</tr></table>
+</tr><tr>
+	<td align=center>12</td>
+	<td align=center>11/16/2000</td>
+	<td align=center>1.10</td>
+	<td align=left>Perl 5.6.0 reports deprecated code construct</td>
+	<td align=center>Fixed</td>
+	<td align=center>1.11</td></tr></table>
 <a name="tips"></a>
 <h2>TIPS & TRICKS</h2><p>
 <ul>
@@ -911,7 +1210,7 @@ future.</li>
 <li>Be careful about checking error status; Both <code>undef</code> and zero are
 interpretted as false, so statements which effect no rows may be interpretted as
 errors if you use the simple <code>$sth-&gt;execute || die $sth-&gt;errstr</code> check.
-Try <code>$sth-&gt;execute || die $sth-&gt;errstr</code> instead.</li>
+Try <code>defined($sth-&gt;execute) || die $sth-&gt;errstr</code> instead.</li>
 <li>Consider setting <b>both</b> <code>PrintError</code> and <code>RaiseError</code>
 to zero during <code>DBI-&gt;connect()</code>, and explicitly checking for errors
 yourself; otherwise, you may exit unexpectedly or get spurious error messages in the output
@@ -925,9 +1224,6 @@ when you're just doing a "precautionary" DROP on a non-existant database object.
 <ul>
 <li>Make thread-safe
 <li>Add CANCEL support
-<li>Add fastload support
-<li>Add fastexport support
-<li>Add array-based bind_param/bind_col for better performance
 <li>Review for performance enhancements
 <li>Add BCD DECIMAL support
 </ul>
@@ -947,7 +1243,7 @@ were invaluable.
 <li><a href="http://www.cpan.org">CPAN</a>
 <li><a href="http://www.perl.com">Perl.com</a>
 <li><a href="http://www.activestate.com">ActiveState</a> (for Perl software for Windows)
-<li><a href="http://www.info.ncr.com">Teradata Online Docs</a>
+<li><a href="http://www.info.ncr.com/sd/index2.htm">Teradata Online Docs</a>
 </ul>
 
 <h2>AUTHOR</h2><p>

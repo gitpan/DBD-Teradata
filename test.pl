@@ -40,7 +40,7 @@ $dbh = DBI->connect("dbi:Teradata:$dsn", $userid, $passwd,
 		PrintError => 0,
 		RaiseError => 0
 	}
-) || die "Can't connect to $dsn: $DBI::errstr. Exitting...\n";
+) || die "Can't connect to $dsn: $DBI::errstr. Exiting...\n";
 warn "Logon ok.\n";
 my $drh = $dbh->{Driver};
 warn "DBD::Teradata v. $drh->{Version}\n";
@@ -112,7 +112,7 @@ warn "Testing Macro creation...\n";
 
 my $dmsth = $dbh->prepare( 'DROP MACRO dbitest');
 if ($dbh->err != 0) { 
-	($dbh->err != 3807) ? die $dbh->errstr : warn $dbh->errstr . "\n" ;
+	($dbh->err != 3824) ? die $dbh->errstr : warn $dbh->errstr . "\n" ;
 }
 
 if (defined($dmsth)) {
