@@ -1,0 +1,1001 @@
+<html><body>
+<i>Last updated November 12, 2000</i><p>
+<h2>NAME</h2><p>
+<h3>
+DBD::Teradata - Perl DBI Driver for Teradata</h3><p>
+
+<ul>
+<li><a href="#synopsis">SYNOPSIS</a>
+<li><a href="#description">DESCRIPTION</a>
+<li><a href="#version">VERSION</a>
+<li><a href="#history">CHANGE HISTORY</a>
+<li><a href="#behavior">DRIVER-SPECIFIC BEHAVIOR</a>
+<ul>
+<li><a href="#dsn">DATA-SOURCE NAME</a>
+<li><a href="#cst">CONNECTIONS, SESSIONS AND TRANSACTIONS</a>
+<li><a href="#types">DATA TYPES</a>
+<li><a href="#parmsql">PARAMETERIZED SQL</a>
+<li><a href="#mstmts">MULTI-STATEMENT AND MACRO REQUESTS</a>
+<li><a href="#sumsel">SUMMARIZED SELECT REQUESTS</a>
+<li><a href="#utilsupp">UTILITY SUPPORT</a>
+<li><a href="#dblbuf">DOUBLE BUFFERING</a>
+<li><a href="#errors">ERROR HANDLING</a>
+<li><a href="#diags">DIAGNOSTICS</a>
+<li><a href="#specattr">DRIVER-SPECIFIC ATTRIBUTES</a>
+<ul>
+<li><a href="#raw">tdat_raw</a>
+<li><a href="#stnum">tdat_stmt_num</a>
+<li><a href="#stinfo">tdat_stmt_info</a>
+<li><a href="#ttlfmt">tdat_TITLE, tdat_FORMAT</a>
+</ul>
+<li><a href="#funcs">DRIVER-SPECIFIC FUNCTIONS</a>
+</ul>
+<li><a href="#conform">CONFORMANCE</a>
+<li><a href="#platforms">SUPPORTED PLATFORMS</a>
+<li><a href="#tips">TIPS & TRICKS</a>
+<li><a href="#bugs">KNOWN BUGS</a>
+<li><a href="#todo">TO DO List</a>
+<li><a href="#acks">ACKNOWLEDGEMENTS</a>
+<li><a href="#refs">REFERENCES</a>
+<li><a href="#copy">COPYRIGHT</a>
+</ul>
+<p>
+<a name="synopsis"></a>
+<h2>SYNOPSIS</h2><p>
+<pre>
+
+     use DBI;
+     my $dbh = DBI->connect(
+          "dbi:Teradata:some.host.com",
+          "user",
+          "passwd")
+          or die "Cannot connect\n";
+     # more DBI calls...
+</pre><p>
+<a name="description"></a>
+<h2>DESCRIPTION</h2><p>
+
+DBI driver for Teradata (See <b>DBI(3)</b> for details).<br>
+<b>BE ADVISED:</b> This is <b>BETA</B> software, and subject to change at the whim of
+the author(s). While every effort has been made to assure conformance to
+DBI-1.13, some peculiarities of Teradata may not be 100% compatible.
+In addition, some niceties of Teradata not found in DBI have been included
+to make this library useful for common Teradata tasks (MACRO and multistatement
+request support, support for summary rows, etc.). Look 
+<a href="http://home.earthlink.net/~darnold/tdatdbd.html">here</a>
+for updates and support.<p>
+<b>NOTE:</B> this driver is 100% pure Perl, and requires <b>no</b> CLI, ODBC, or other
+interface libraries, other than the standard DBI package.
+<p>
+
+The package is now available on <a href="www.cpan.org">CPAN</a>.
+<a name="version"></a>
+<h2>CURRENT VERSION</h2><p>
+
+Release 1.10
+<a name="history"></a>
+<h2>CHANGE HISTORY</h2><p>
+
+Release 1.10:<p>
+<ul>
+<li>added nonblocking session support (FirstAvailable, Realize driver-specific functions)</li>
+<li>fixed dbh-&gt;do() to return -1 for non-data returning statements</li>
+<li>fixed typographical bug in dbh-&gt;err()</li>
+<li>added tdat_TITLE, tdat_FORMAT to return title and format info for each returned field</li>
+<li>added SummaryPosition, SummaryPosStart attributes to statement information hash to 
+provide the column number associated with a summary column</li>
+<li>restricted HELP statement processing due to bugs in returned data.</li>
+<li>fixed dbh-&gt;prepare() to not create statement handle in event of error</li>
+<li>fixed dbh-&gt;execute() to return proper values in case of error or non-data returning statements</li>
+<li>added more complete testing script ("tdattest.pl")</li>
+<li>added proper packaging (Makefile, pod, etc.)</li>
+<li>clarified licensing issues (see <a href='#copy'>COPYRIGHT</a> section)</li>
+</ul><p>
+Release 1.00:<p>
+<ul>
+<li>First public release</li>
+</ul>
+
+<a name="behavior"></a>
+<h2>DRIVER-SPECIFIC BEHAVIOR</h2><p>
+<a name="dsn"></a>
+<h3>DATA-SOURCE NAME</h3><p>
+
+The dsn string passed to <code>DBI-&gt;connect()</code> must be of the following form:<p>
+<pre>
+     dbi:Teradata:host[:port]
+</pre><p>
+
+where
+<ul>
+<li><b>host</b> is a TCP/IP address in human-readable or dotted-decimal format,
+<li><b>port</b> is an optional TCP/IP port number to use (default is 1025,
+the most common value), 
+</ul><p>
+Note that this driver will <b>NOT</B> perform the random
+selection algorithm for resolving the hostname(via the
+"hostnameCOPN" convention)  when multiple paths are available.
+You should either use the
+full explicit hostname (e.g., "DBCCOP1"), the numeric IP address (e.g.,
+"1.2.3.4"), create an alias for the explicit hostname, or, better still,
+use <b>bind(3)</b> the way God intended.<p>
+RunStartup execution is not supported.<p>
+<a name="cst"></a>
+<h3>CONNECTIONS, SESSIONS AND TRANSACTIONS</h3><p>
+
+Multiple connections (aka sessions) to a Teradata database are supported.
+Note that the number of sessions in a single process instance is limited,
+due to the limitations of Perl's <b><i>select()</i></b> implementation.
+Large scale multisession applications should use <b>fork()</b> early
+and often to permit more than 10 or 20 sessions to execute concurrently.<p>
+
+Currently, the driver operates in Teradata mode (i.e., *not* ANSI mode).
+
+That means that DDL statements and multistatement requests implicitly finish a transaction,
+and AUTOCOMMIT is the default. We don't flag any non-ANSI SQL, either.
+See the <a href="http://www.info.ncr.com">Teradata SQL documents</a>
+for all the differences between ANSI and Teradata behavior.
+Eventually, support for selecting a session mode may be added.<p>
+
+Cursor SQL syntax (i.e., <code>...WHERE CURRENT OF...</code>) is not supported.<p>
+
+We don't cache statements here...the DBMS does that very nicely, thank you.<p>
+
+Session reconnection is not supported...and probably never will be.<p>
+
+Teradata account strings can be provided by simply appending a
+single comma, followed by the single-quoted account string,
+to the password string, e.g.,<br>
+<pre>
+     use DBI;
+     my $dbh = DBI->connect(
+          "dbi:Teradata:some.host.com",
+          "user",
+          "passwd,'\$H&Lmyaccount'")
+          or die "Cannot connect\n";
+     # more DBI calls...
+</pre>
+
+HELP statements are not supported, due to an apparent bug in the data returned by the DBMS in 
+RECORD mode.
+
+<a name="types"></a>
+<h3>DATA TYPES</h3><p>
+
+The following list maps DBI defined data types to their Teradata 
+equivalent (if applicable):<p>
+
+<table border=1><tr><td align=center><b>DBI<br>Data Type</td><td align=center><b>Teradata<br>Data Type</td>
+<tr>
+<td align=center> SQL_CHAR	</td><td align=center>CHAR</td></tr>
+<td align=center> SQL_NUMERIC </td><td align=center>DECIMAL</td></tr>
+<td align=center> SQL_DECIMAL </td><td align=center>DECIMAL</td></tr>
+<td align=center> SQL_INTEGER </td><td align=center>INTEGER</td></tr>
+<td align=center> SQL_SMALLINT	</td><td align=center>SMALLINT</td></tr>
+<td align=center> SQL_FLOAT </td><td align=center>FLOAT</td></tr>
+<td align=center> SQL_REAL </td><td align=center>FLOAT</td></tr>
+<td align=center> SQL_DOUBLE </td><td align=center>FLOAT</td></tr>
+<td align=center> SQL_VARCHAR	</td><td align=center>VARCHAR</td></tr>
+<td align=center> SQL_DATE </td><td align=center>DATE</td></tr>
+<td align=center> SQL_TIME </td><td align=center>TIME</td></tr>
+<td align=center> SQL_TIMESTAMP	</td><td align=center>TIMESTAMP</td></tr>
+<td align=center> SQL_LONGVARCHAR </td><td align=center>LONG VARCHAR</td></tr>
+<td align=center> SQL_BINARY </td><td align=center>BYTE</td></tr>
+<td align=center> SQL_VARBINARY </td><td align=center>VARBYTE</td></tr>
+<td align=center> SQL_LONGVARBINARY	</td><td align=center>LONG VARBYTE</td></tr>
+<td align=center> SQL_BIGINT </td><td align=center>	N/A</td></tr>
+<td align=center> SQL_TINYINT	</td><td align=center>BYTEINT</td></tr>
+<td align=center> SQL_WCHAR </td><td align=center>N/A</td></tr>
+<td align=center> SQL_WVARCHAR </td><td align=center>N/A </td></tr>
+<td align=center> SQL_WLONGVARCHAR </td><td align=center>N/A</td></tr>
+<td align=center> SQL_BIT </td><td align=center>N/A</td></tr>
+</table><p>
+
+NOTE: INTERVAL types are not yet supported.<p>
+
+<b>CAUTION:</B> Floating point and DECIMAL support within the Teradata DBMS requires
+specific knowledge of the client platform. Platforms the DBMS
+currently knows about are:<p>
+
+<ul>
+<li>Any Intel X86/Pentium
+<li> Sun SPARC
+<li> Motorola 68XXX
+<li> VAX
+<li> IBM 370/390
+<li> AMDAHL
+<li> Honeywell
+</ul><p>
+
+This driver attempts to auto-detect the platform on which it is running as
+follows:<p>
+
+<table border=1><tr>
+<td align=center><b>Character<br>Set</td><td align=center><b>Integer format</td><td align=center><b>Assumed<br>Platform</td></tr>
+<td align=center>ASCII</td><td align=center>not network-order<br>(MSB last)</td><td align=center>Intel</td></tr>
+<td align=center>ASCII</td><td align=center>network-order<br>(MSB first)</td><td align=center>SPARC/MOTOROLA</td></tr>
+<td align=center>EBCDIC</td><td align=center>don't care</td><td align=center>IBM370/390</td></tr></table>
+<p>
+Autodetection can be overridden by setting the environment variable
+<code>TDAT_PLATFORM_CODE</code> to the appropriate platform code:<p>
+
+<table border=1><tr><td align=center><b>Platform</b></td><td align=center><b>TDAT_PLATFORM_CODE<br>Value</b></td></tr>
+<tr><td align=center>Any Intel X86/Pentium</td><td align=center>8</td></tr>
+<tr><td align=center> Sun SPARC,<br>Motorola 68XXX,<br>ATT 3b2</td><td align=center>7</td></tr>
+<tr><td align=center> VAX</td><td align=center>9</td></tr>
+<tr><td align=center> IBM 370/390</td><td align=center>3</td></tr>
+<tr><td align=center> AMDAHL UTS</td><td align=center>10</td></tr>
+<tr><td align=center> Honeywell</td><td align=center>4</td></tr>
+</tr></table><p>
+
+If your platform's floating point (specifically, double-precision) format
+does not match that of one of those platforms, <b>AVOID FLOATING POINT VALUES!</b>
+Substituting DECIMAL or CHARACTER values will often work well, though
+loss of precision may be a problem.<p>
+
+For some platforms (notably VAXen and mainframes), Teradata returns
+DECIMALs as binary-coded decimal (BCD) values. For most workstation
+platforms (Intel and most RISC), DECIMAL is returned as a simple
+fix-point integer. Currently, DBD::Teradata only converts the latter
+format. BCD encoded values may eventually be supported if sufficient
+hue and cry is raised...but it's currently not a priority.<p>
+
+Finally, note that double-byte character sets (i.e, UNICODE, Kanji, etc.) are not
+supported. You can try 'em, but I wouldn't count on Perl handling them,
+much less DBI.<p>
+
+<a name="parmsql"></a>
+<h3>PARAMETERIZED SQL</h3><p>
+This driver supports both <code>USING</code> clauses and placeholders
+to implement parameterized SQL; however, they cannot be mixed
+in the same request. Also, when using placeholders, all parameter
+datatypes are assumed to be <code>VARCHAR(16)</code> unless explicit
+datatypes are specified via a bind_param() call, or the environment
+variable TDAT_PH_SIZE has been defined to another value. However,
+the driver <b>will</B> adjust the parameter type declaration provided to the
+DBMS upon <code>execute()</code> so that parameters without explicit type
+specifications which exceed the <code>VARCHAR(16)</code> size, will be
+presented to the DBMS as <code>VARCHAR(&lt;actual-param-length&gt;)</code>.<p>
+
+<a name="mstmts"></a>
+<h3>MULTI-STATEMENT AND MACRO REQUESTS</h3><p>
+Multi-statement and MACRO execution requests are supported. Stored procedures
+may eventually be supported, but not until the Teradata V2R4.0 release (which adds
+stored procedure support to the DBMS) has matured.<p>
+
+Reporting the results of multi-statement and MACRO requests presents some special
+problems. Refer to the <a href="#specattr"><b>DRIVER SPECIFIC ATTRIBUTES</b></a> section 
+below for detailed descriptions
+of relevant statement handle attributes. The driver behavior is augmented as follows:
+
+<ul>
+<li>All DBI statements will have an associated <code>tdat_stmt_info</code>
+statement handle attribute. (Note that DBI's notion of a statement is equivalent to
+a Teradata <b><i>request, which may contain more than 1 SQL statement</i></b>. For the 
+purposes of this discussion, the Teradata definitions of request and statement will be
+used; when refering to DBI's definition of a statement, the term "DBI statement" will
+be used). 
+<code>tdat_stmt_info</code> returns an arrayref of hashrefs. Each array entry
+is indexed by its associated statement number within a Teradata request.
+The hashref has several keys, described in the following sections and in the
+<a href="#specattr"><b>DRIVER-SPECIFIC ATTRIBUTES</b></a> section.<p>
+
+<li>For multi-statement and MACRO requests which do not return rows (i.e.,
+do not include SELECT statements), the <code>fetchrow_XXX()</code> statement
+handle method will always return an empty string result. The activity type,
+activity count, and warning message of an individual statement
+can be queried via the <code>ActivityType</code>, <code>ActivityCount</code> and 
+<code>Warning</code> keys in the statement's hashref in the array returned by the
+<code>tdat_stmt_info</code> attribute.<p>
+
+<li>Multi-statement and MACRO requests which include a single SELECT statement
+are handled exactly like a single SELECT statement.
+Note that if any non-SELECT statements
+sequentially follow the SELECT statement, their attributes should not be queried
+until all SELECTed rows have been fetched, since the results of the succeding statements
+are not reported by the DBMS until all the rows have been returned.<p>
+
+<li>Multi-statement and MACRO requests which include multiple SELECT statements
+require special handling when fetching results. The <code>tdat_stmt_info</code>
+attributes still apply as for single-SELECT multi-statement or MACRO requests. However, the
+column (and summary) information for <b><i>all</i></b> SELECT statements are included in the
+<b><code>NAME, TYPE, PRECISION, SCALE, </b>and<b> NULLABLE</code></b> DBI statement handle
+attributes, and each fetched row will include fields for <b><i>all</i></b>
+SELECT statements, but only the fields for the current SELECT
+statement will be be valid. All fields for non-current SELECT will be set to
+<b><code>undef</code></b> (<i>not unlike the results of an OUTER JOIN</i>).
+In order to identify the SELECT statement that a <code>fetchrow_XXX()</code> call
+is processing:
+<ul>
+<li>the <code>tdat_stmt_num</code> attribute can be queried to get the
+current statement number
+
+<li>the starting index of column information for the current statement
+can be retrieved via the key <b><code>StartsAt</code></b> in the hashref 
+located at the current statement's index in the array returned by the 
+<code>tdat_stmt_info</code> attribute.
+
+<li>the ending index of column information for the current statement
+can be retrieved via the key <b><code>EndsAt</code></b> in the hashref 
+located at the current statement's index in the array returned by the 
+<code>tdat_stmt_info</code> attribute.
+
+</ul>
+</ul>
+<p>
+An example of processing multi-SELECT requests:<p>
+<pre>
+
+$sth = $dbh->prepare('SELECT user; SELECT date; SELECT time;');
+$names = $sth->{NAME};
+$types= $sth->{TYPE};
+$precisions = $sth->{PRECISION};
+$scales = $sth->{SCALE};
+$stmt_info = $sth->{'tdat_stmt_info'};
+
+$sth->execute();
+$currstmt = -1;
+while ($rows = $sth->fetch_array()) {
+	if ($currstmt != $sth->{'tdat_stmt_num'}) {
+		print "\n\n";
+		$currstmt = $sth->{'tdat_stmt_num'};
+		$stmthash = $$stmt_info[$currstmt};
+		$starts_at = $$stmthash{'StartsAt'};
+		$ends_at = $$stmthash{'EndsAt'};
+		for ($i = $starts_at; $i &lt;= $ends_at; $i++) {
+			print "$$names[$i] ";
+		}
+		print "\n";
+	}
+	for ($i = $starts_at; $i &lt;= $ends_at; $i++) {
+		print "$row[$i] ";
+	}
+}
+
+</pre>
+<p>
+<i>Yeah, this is kinda ugly...but it keeps DBI happy while providing support for
+important Teradata features, and lets applications either ignore or adapt to the
+specializations in a reasonably painless way.</i><p>
+
+<a name="sumsel"></a>
+<h3>SUMMARIZED SELECT REQUESTS</h3><p>
+Like multi-statement and MACRO requests, reporting the results of 
+summarized SELECT requests requires some special processing. Refer to the 
+<a href="#specattr"><b>DRIVER SPECIFIC ATTRIBUTES</b></a> section 
+below for detailed descriptions
+of relevant statement handle attributes. The driver behavior is augmented as follows:
+<ul>
+<li>Like multi-SELECT statement requests, summarized SELECT statements will include <b>all</b>
+summary columns in the DBI attribute and row data arrays. The summary columns in the rowdata 
+array returned by <code>fetchrow_XXX()</code> will be set to <code>undef</code> until a 
+summary row is returned by the DBMS.
+
+<li>When a summary row is fetched, an <code><b>IsSummary</b></code> attribute of the 
+current statment hashref (stored at the current statement number index within the arrayref returned
+by the <code>tdat_stmt_info</code> statement handle attribute) returns the summary row
+number of the current statement; otherwise, it will be set to <code>undef</code>.
+
+<li>the current statement hashref also includes <b><code>SummaryStarts</code></b> and 
+<b><code>SummaryEnds</code></b> attributes,
+which return arrays (indexed by summary row number) of starting and ending indexes, respectively,
+within the DBI attribute and row data arrays for each summary row
+(You're probably confused at this point, so review the 
+<a href="#sumeg">example</a> below).
+
+<li>the current statement hashref includes a <b><code>SummaryPosition</code></b> attribute,
+which returns an arrayref of the column numbers associated with each summary field
+within the current statement. <b>NOTE:</b> SummaryPosition information is not available
+until after the execute() method has been called and a summary row has been fetched.
+
+<li>the current statement hashref includes a <b><code>SummaryPosStart</code></b> attribute,
+which returns an arrayref, indexed by summary row number, of the starting index within the 
+<b><code>SummaryPosition</code></b> array for the current summary row.
+<b>NOTE:</b> SummaryPosStart information is not available
+until after the execute() method has been called and a summary row has been fetched.
+</ul><p>
+<a name="sumeg"></a>
+An example of processing summarized SELECT:<p>
+<pre>
+
+$sth = $dbh->prepare('SELECT Name FROM Employees WITH AVG(Salary), SUM(Salary)');
+$names = $sth->{NAME};
+$types= $sth->{TYPE};
+$precisions = $sth->{PRECISION};
+$scales = $sth->{SCALE};
+$stmt_info = $sth->{'tdat_stmt_info'};
+
+$sth->execute();
+$currstmt = -1;
+while ($rows = $sth->fetchrow_array()) {
+	if ($currstmt != $sth->{'tdat_stmt_num'}) {
+#
+#	new stmt, get its info
+#
+		print "\n\n";
+		$currstmt = $sth->{'tdat_stmt_num'};
+		$stmthash = $$stmt_info[$currstmt];
+		$starts_at = $$stmthash{'StartsAt'};
+		$ends_at = $$stmthash{'EndsAt'};
+		$sumstarts = $$stmthash{'SummaryStarts'}; 
+		$sumends = $$stmthash{'SummaryEnds'}; 
+		$sumrow = $$stmthash{'IsSummary'};
+		for ($i = $starts_at; $i &lt;= $ends_at; $i++) {
+			print "$$names[$i] ";	# print the column names
+		}
+		print "\n";
+	}
+	if (defined($sumrow)) {
+#
+#	got a summary row, space it
+#	NOTE: this example uses simple tabs to space summary fields;
+#	in practice, a more rigorous method to precisely align summaries with their
+#	respective columns would be used
+#
+		$sumpos = $$stmthash{'SummaryPosition'};
+		$sumposst = $$stmthash{'SummaryPosStart'};
+		print "\n-----------------------------------------------------\n";
+		for ($i = $$sumstart[$sumrow], $j = $$sumposst[$sumrow]; 
+			$i &lt;= $$sumend[$sumrow]; $i++, $j++) {
+			print ("\t" x $$sumpos[$j]);	# tab each column for alignment
+			print "$$names[$i]: $row[$i]\n";
+		}
+	}
+	else {
+#
+#	regular row, just print the values
+#
+		for ($i = $starts_at; $i &lt;= $ends_at; $i++) {
+			print "$row[$i] ";
+	}
+}
+
+</pre>
+<p>
+<i>Yeah, this is ugly too...but, again, it keeps DBI happy while providing support for
+important Teradata features. Besides, you can always ignore the summary stuff if you want.</i><p>
+
+<a name="utilsupp"></a>
+<h3>UTILITY SUPPORT</h3><p>
+Some support for fastload and fastexport may eventually be implemented.
+Support for these utility interfaces should be useful for large-scale ETL pipelines,
+or just simply importing/exporting directly from/to other database systems.<p>
+
+<a name="dblbuf"></a>
+<h3>DOUBLE BUFFERING</h3><p>
+
+Double buffering (i.e., issuing a CONTINUE to the DBMS while the
+application is still fetching data from the last received set of rowdata)
+is supported, but not yet thoroughly tested. Use at your own risk by
+defining an environment variable <b><code>TDAT_NO2BUFS=0</code></b>.<p>
+
+<a name="errors"></a>
+<h3>ERROR HANDLING</h3><p>
+
+DBI does not support the notion of warnings;
+therefore, the hashref provided by the driver specific statement handle attribute 
+<code>tdat_stmt_info</code> provides a <code>Warning</code> attribute that
+can be queried to retrieve warning messages.
+<p>
+
+<a name="diags"></a>
+<h3>DIAGNOSTICS</h3><p>
+
+DBI provides the <code>trace()</code> function to enable various levels
+of trace information. DBD::Teradata uses this trace level to report
+its internal operation, as well.<p>
+
+<ul>
+<li>If the trace level is unset, or set to zero, no diagnostic reporting 
+is performed.
+<li>If trace level is set to 1, some limited diagnostic reporting is
+performed. This trace level is useful for informational (as opposed to
+debugging) purposes.
+<li>If trace level is set to 2 or higher, detailed level diagnostic
+reporting is performed. Hex dumps of sent and received parcel
+streams and message headers will be included if an environment
+variable TDAT_DBD_DEBUG is set to a non-zero value. 
+This level should be used
+whenever a potential driver bug is believed to exist, and
+the resulting report should be included when the bug is reported
+(assuming the data stream doesn't include sensitive information).
+<b>PLEASE DON'T SEND DIAGNOSTIC DUMPS THAT INCLUDE CONFIDENTIAL
+OR SENSITIVE INFORMATION!!</b> Instead, try to reproduce the problem
+using dummy data.
+</ul>
+
+<a name="specattr"></a>
+<h3> DRIVER-SPECIFIC ATTRIBUTES</h3><p>
+There are some additional attributes that the user can query a 
+statement handle for:<p>
+
+<ul>
+<a name="raw"></a>
+<li> tdat_raw<p>
+<i>Write-only on statement handle creation; read-only on statement handle thereafter.</i><br>
+When set to either <code>RecordMode</code> or <code>IndicatorMode</code> in the attributes hash provided to a
+<code>$dbh-&lt;prepare()</code>
+call, causes the resulting DBI statement handle to either provide the output rowdata, or
+accept the input parameter data, in Teradata binary import/export format (i.e., <br>
+<code>&lt;2 byte length&gt;&lt;(optional) N bytes of indicators&gt;&lt;N bytes of data&gt;&lt;newline&gt;</code>).
+Specifying <code><b>RecordMode</b></code> indicates data is provided without the NULL indicator
+bits; <code><b>IndicatorMode</b></code> indicates data is provided with indicator bits.<p>
+
+In raw input format,
+each row of parameter data should be bound as SQL_VARBINARY type; in raw
+output format, the row data will be returned as a single SQL_VARBINARY
+result column. This attribute is
+intended to provide a faster path for import/export pipelines
+by avoiding the translation to/from internal Perl datatypes. E.g.,<p>
+<pre>
+open (FLIMPORT, 'fload.data') || die 'Can't open import data file: $!\n";
+
+$sth = $dbh->prepare('USING (col1 integer, col2 char(20), col3 float, col4 varchar(100)) '
+	. 'INSERT INTO MyTable VALUES(:col1, :col2, :col3, :col4);',
+	{ 'tdat_raw' => 'IndicatorMode' });
+
+while (sysread(FLIMPORT, $len, 2)) {
+	sysread(FLIMPORT, $buffer, $len+1);	# remember the newline!
+	$buffer = pack("SA*", $len, $buffer);
+	$sth->bind_param(1, $buffer, { 
+		TYPE =&gt; SQL_VARBINARY,
+		PRECISION =&gt; length($buffer)
+	});
+	$sth->execute( $buffer );
+}
+</pre>
+
+<a name="stnum"></a>
+<li>tdat_stmt_num<p>
+
+<i>Read-only on statement handle.</i><br>
+Returns the number of the current statement within the request associated with
+the statement handle. Applies only for the <code>fetchrow_XXX()</code> statement
+handle method; for requests which do not include SELECT statements, the returned
+value is the total number of statements executed by the request.<p>
+
+<a name="stinfo"></a>
+<li>tdat_stmt_info<p>
+
+<i>Read-only on statement handle.</i><br>
+Returns an arrayref of hashrefs of Teradata statement information for each Teradata statement 
+within the request associated with the DBI statement handle.
+The following attributes are included in each statement's hashref:<p>
+<ul>
+<li><code><b>ActivityType</b></code> - indicates the type of activity ('Select', 'Insert', 'Update', etc.)
+of the statement.
+
+<li><code><b>ActivityCount</b></code> - indicates the number of rows effected by the statement.
+
+<li><code><b>Warning</b></code> - indicates any warning message associated with the statement. Returns
+<code>undef</code> if none.
+
+<li><code><b>StartsAt</b></code> - returns the starting index of a statement's returned column info or
+data within the DBI column info and data arrays 
+(<code><b>NAME</b></code>, <code><b>PRECISION</b></code>, etc., as well as the results
+of <code>fetchrow_XXX()</code>).
+Each attribute and rowdata array includes entries for all columns of all SELECT statements
+within a request. In order to isolate the array entries which apply to the statement
+currently being fetched from, use the result of <code>$sth->{'tdat_stmt_num'}</code>
+to index into the information and data arrayref's. See the 
+<a href="#mstmts"><b>MULTI-STATEMENT AND MACRO REQUESTS</b></a>
+section above for details. For non-SELECT statements, <code>undef</code> is returned.
+
+<li><code><b>EndsAt</b></code> - returns the (inclusive) ending index of a statement's 
+returned column attribute and data within the DBI attribute and row data arrays.
+This does NOT include any summary columns information generated by the statement.
+For non-SELECT statements, <code>undef</code> is returned.
+
+<li><code><b>IsSummary</b></code> - returns the current summary
+row number for the statement, if any, or <code>undef</code> if not a summarized SELECT 
+statement, or if the current row is not a summary row. The returned value is used to index
+into the arrays returned by <code><b>SummaryStarts</b></code> and <code><b>SummaryEnds</b></code> 
+to locate the field values and attributes for the specified summary row.
+
+<li><code><b>SummaryPosition</b></code> - returns an arrayref of the column numbers
+associated with the summary fields in each summary row.
+Set to <code>undef</code> for non-SELECT or non-summarized statements. SummaryPosition 
+information is not available until after the execute() method has been called and a
+summary row has been fetched.
+
+<li><code><b>SummaryPosStart</b></code> - returns an arrayref, indexed by summary row number,
+of the starting index within the <code><b>SummaryPosition</b></code> array for each summary row.
+Set to <code>undef</code> for non-SELECT or non-summarized statements. SummaryPosStart
+information is not available until after the execute() method has been called and a
+summary row has been fetched.
+
+<li><code><b>SummaryStarts</b></code> - returns an array of starting indexes within the DBI
+attribute and row data arrays for a statement's summary column info and data. Set to <code>undef</code>
+for non-SELECT or non-summarized statements. When processing a summarized statement,
+an application
+<ul>
+<li>retrieves the current statement's hashref from the arrayref returned by the
+<code>tdat_stmt_info</code> statement handle attribute
+<li>checks the <code>IsSummary</code> attribute of the current statement hashref
+<li>retrieves the <code>SummaryStarts</code> and <code>SummaryEnds</code> arrays from the
+current statement hashref
+<li>uses the current summary row number (from the <code>IsSummary</code> attribute) to
+get the starting and ending indexes (inclusive) of column attribute and row data
+from the <code>SummaryStarts</code> and <code>SummaryEnds</code> arrays 
+<li>iterates through the DBI attribute and row data arrays using the retrieved start and end
+indexes.
+</ul>
+Refer to the <a href="#sumeg">example</a> above for a better understanding of the
+summary attribute structure.
+<li><code><b>SummaryEnds</b></code> - returns an array of ending indexes within the DBI
+attribute and row data arrays for a statement's summary column info and data.
+Set to <code>undef</code> for non-SELECT or non-summarized statements.
+</ul>
+
+An example use of these attributes:<p>
+<pre>
+$sth = $dbh->prepare("INSERT INTO table VALUES(?,?,?,?); "
+. "UPDATE table2 SET col1 = 'another value' WHERE col1 = 'some value';");
+
+$rows = $sth->execute(1, 2, 3, 4);
+$stmtcnt = $sth->{'tdat_stmt_num'};	# no SELECT, so returns number of last stmt
+$stmt_info = $sth->{'tdat_stmt_info'};
+for ($i = 0; $i &lt; $stmtcnt; $i++) {
+	$stmthash = $$stmt_info[$i];
+	$activity = $$stmthash{'ActivityType'};
+	$stmtrows = $$stmthash{'ActivityCount'};
+	$warn = $$stmthash{'Warning'};
+	if ($warn) {
+		print "Statement $i: $warn\n";
+	}
+	print "$activity at statement $i effected $stmtrows rows.\n";
+}
+</pre></li><p>
+
+<a name="ttlfmt"></a>
+<li> tdat_TITLE, tdat_FORMAT<p>
+<i>Read-only on statement handle.</i><br>
+Returns arrayref's of field title and format information (e.g., from (TITLE...) and (FORMAT ...)
+clauses on SELECT or table/view specifications), ala the NAME, TYPE, PRECISION, etc. attributes.</li><p>
+</ul>
+<p>
+
+<a name="funcs"></a>
+<h3> DRIVER-SPECIFIC FUNCTIONS</h3><p>
+
+In order to make this driver useful for high-performance ETL
+applications, support for multiple concurrent sessions is needed.
+Unfortunately, native DBI doesn't currently support the type
+of asynchronous session interaction needed to efficiently
+move data to/from a MPP database system (hopefully, when
+Perl is more thread safe, DBI will remove its current
+single thread per DBD mutex restriction, and this special
+function won't be needed). To address this need, a "FirstAvailable"
+and "Realize" function have been provided.<p>
+
+<ul>
+<li><code>$i = $drh->func(@param_list, FirstAvailable);</code><p>
+
+$param_list[0] is an arrayref of database handles, and $param_list[1] is a timeout specification
+(in seconds, -1 or undef indicate infinite wait). Returns the index of the first session
+within the supplied database handle array that is ready to be serviced. If none of the
+sessions is ready for service, it waits up to the timeout
+number of seconds (or forever if timeout is -1 or undef) for a session
+to become ready.</li><p>
+
+<li><code>$i = $sth->func(undef, Realize);</code><p>
+
+Realizes the results of a non-blocking statement execution. <code>FirstAvailable</code>
+only waits for and reports that a session is ready; it does <b>not</b> process the results
+of the statement. <code>Realize</code> performs the actual processing of the database
+response, including returning the success or failure of the operation, and any returned
+rows.</li><p>
+</ul>
+<b>WARNING:</b> This functionality relies on the <code>select()</code> system I/O call to determine
+sessions that have pending responses. Perl's implementation of <code>select()</code> limits the
+useable file descriptor values to the range 0..31. If your application uses a large number
+of file handles, both for DBMS sessions and for other I/O, some of your sessions may be
+assigned file descriptors &gt;= 32 and thus be unavailable for processing by FirstAvailable.
+A future version of DBD::Teradata may remove this limitation by using a multithreaded
+internal architecture. Until then, applications which intend to use this funtionality should
+logon all their Teradata sessions before opening additional files, and limit the number
+of sessions to less than 30.<p>
+In addition, some platforms (notably Windows 95 and 98) may limit the total number of TCP/IP connections
+which you can initiate.<p>
+An example use of these functions to bulkload a table:<p>
+<pre>
+my $drh;
+my @dbhlist;
+my @sthlist;
+open(IMPORT "$infile") || die "Can't open import file";
+binmode IMPORT;
+
+for (my $i = 0; $i &lt; 10; $i++) {
+	$dbhlist[$i] = DBI-&gt;connect("dbi:Teradata:dbc", "dbc", "dbc");
+	if (!defined($drh)) { $drh = $dbhlist[$i]-&gt;{Driver}; }
+}
+my @fa_parms = (\@dbhlist, -1);
+
+for (my $i = 0; $i &lt; $sesscount; $i++) {
+	$sthlist[$i] = $dbhlist[$i]-&gt;prepare(
+		'USING (col1 INTEGER, col2 CHAR(30), col3 DECIMAL(9,2), col4 DATE) ' .
+		'INSERT INTO mytable VALUES(?, ?, ?, ?)', {
+		tdat_nowait =&gt; 1,
+		tdat_raw =&gt; IndicatorMode
+	});
+	sysread(IMPORT, $buffer, $len)) {
+	$sthlist[$i]-&gt;bind_param(1, $buffer);
+	$sthlist[$i]-&gt;execute();
+}
+
+while (sysread(IMPORT, $buffer, $len)) {
+	$i = $drh-&gt;func(@fa_parms, FirstAvailable);
+	$rowcnt = $sthlist[$i]-&gt;func(undef, Realize);
+	if (!defined($rowcnt)) { 
+		print STDERR " ** INSERT failed: " . $sthlist[$i]-&gt;errstr() . "\n";
+	}
+	$sthlist[$i]-&gt;bind_param(1, $buffer);
+	$sthlist[$i]-&gt;execute();
+}
+
+while (some statements still active) {
+	$i = $drh-&gt;func(@fa_parms, FirstAvailable);
+	$rowcnt = $sthlist[$i]-&gt;func(undef, Realize);
+	if (!defined($rowcnt)) { 
+		print STDERR " ** INSERT failed: " . $sthlist[$i]-&gt;errstr() . "\n";
+	}
+	$sthlist[$i]-&gt;finish();
+}
+</pre></ul><p>
+
+<a name="conform"></a>
+<h2>CONFORMANCE</h2><p>
+
+DBD::Teradata requires a minimum Perl version of 5.005, and a minimum
+DBI version of 1.13.<p>
+
+The following DBI functions are not yet supported:
+<pre>
+DBI->data_sources()
+$dbh->prepare_cached()
+$sth->table_info()
+$dbh->tables()
+$dbh->type_info_all()
+$dbh->type_info()
+</pre>
+
+Also be advised that using either <code>selectall_arrayref()</code> or
+<code>fetchall_arrayref()</code> is probably a bad idea unless you know
+the number of rows returned is reasonably small.<p>
+
+<a name="platforms"></a>
+<h2>SUPPORTED PLATFORMS</h2><p>
+The driver has been successfully tested against both MPRAS and NT based DBMS's up to V2R3.
+The following table lists the client platforms (hardware and O/S) that have been successfully
+tested to date.<br>
+<table border=1><tr>
+	<th align=center>Hardware</th>
+	<th align=center>OS</th>
+	<th align=center>Perl Version</th>
+</tr><tr>
+	<td align=center>Intel/AMD PC</td>
+	<td align=center>Win98</td>
+	<td align=center>5.005<br>(ActivePerl)</td>
+</tr><tr>
+	<td align=center>Intel PC</td>
+	<td align=center>WinNT 4.0 SP6</td>
+	<td align=center>5.6<br>(ActivePerl)</td>
+</tr><tr>
+	<td align=center>Intel PC</td>
+	<td align=center>Linux</td>
+	<td align=center>5.??</td>
+</tr><tr>
+	<td align=center>NCR 4XXX (Intel)</td>
+	<td align=center>MPRAS</td>
+	<td align=center>5.005</td>
+</tr><tr>
+	<td align=center>iMac DV (PowerPC)</td>
+	<td align=center>LinuxPPC</td>
+	<td align=center>5.005</td>
+</tr><tr>
+	<td align=center>Sun SPARC</td>
+	<td align=center>Solaris 4.3</td>
+	<td align=center>5.005</td>
+</tr><tr>
+	<td align=center>IBM RS/6000</td>
+	<td align=center>AIX</td>
+	<td align=center>5.005</td>
+</table><br>
+<p>
+<a name="bugs"></a>
+<h2>KNOWN BUGS</h2><p>
+
+<table border=1><tr>
+	<th align=center>Bug Number</th>
+	<th align=center>Report<br>Date</th>
+	<th align=center>Release<br>Reported in</th>
+	<th align=center>Description</th>
+	<th align=center>Status</th>
+	<th align=center>Fix<br>Release</th>
+</tr><tr>
+	<td align=center>1</td>
+	<td align=center>7/16/2000</td>
+	<td align=center>0.01</td>
+	<td align=center>statement handle attributes report field values after preparing a DDL statement</td>
+	<td align=center>Open</td>
+	<td align=center>&nbsp;</td>
+</tr><tr>
+	<td align=center>2</td>
+	<td align=center>7/19/2000</td>
+	<td align=center>0.01</td>
+	<td align=center>Bareword symbol in STORE function when trying to set AutoCommit</td>
+	<td align=center>Fixed</td>
+	<td align=center>0.02</td>
+</tr><tr>
+	<td align=center>3</td>
+	<td align=center>7/21/2000</td>
+	<td align=center>0.01</td>
+	<td align=left>Undefined symbol value referenced when disconnecting; possibly related to CONTINUE'd datasets</td>
+	<td align=center>Fixed</td>
+	<td align=center>0.02</td>
+</tr><tr>
+	<td align=center>4</td>
+	<td align=center>7/25/2000</td>
+	<td align=center>0.02</td>
+	<td align=left>Can't connect on non-Intel (i.e., SPARC, PowerPC, PA-RISC) platforms</td>
+	<td align=center>Fixed</td>
+	<td align=center>0.04</td>
+</tr><tr>
+	<td align=center>5</td>
+	<td align=center>8/9/2000</td>
+	<td align=center>0.04</td>
+	<td align=left>Placeholders/USING clauses generate 2655 error on non-Intel platforms</td>
+	<td align=center>Fixed</td>
+	<td align=center>0.07</td>
+</tr><tr>
+	<td align=center>6</td>
+	<td align=center>8/10/2000</td>
+	<td align=center>0.04</td>
+	<td align=left>Can't connect on SPARC/Solaris or AIX</td>
+	<td align=center>Fixed</td>
+	<td align=center>0.07nosocks1</td>
+</tr><tr>
+	<td align=center>7</td>
+	<td align=center>7/25/2000</td>
+	<td align=center>0.02</td>
+	<td align=left>DBMS Errors not properly reported</td>
+	<td align=center>Fixed</td>
+	<td align=center>0.05</td>
+</tr><tr>
+	<td align=center>8</td>
+	<td align=center>8/16/2000</td>
+	<td align=center>0.07</td>
+	<td align=left>Parameterized INSERT of TIMESTAMP fields causes DBMS error.</td>
+	<td align=center>Fixed</td>
+	<td align=center>0.09</td>
+</tr><tr>
+	<td align=center>9</td>
+	<td align=center>9/4/2000</td>
+	<td align=center>0.08</td>
+	<td align=left>DECIMAL types with precision &gt; 9 broken on non-Intel platforms.</td>
+	<td align=center>Fixed</td>
+	<td align=center>0.09</td>
+</tr><tr>
+	<td align=center>10</td>
+	<td align=center>11/1/2000</td>
+	<td align=center>1.00</td>
+	<td align=left>do() reports error for non-data returning statements.</td>
+	<td align=center>Fixed</td>
+	<td align=center>1.10</td>
+</tr><tr>
+	<td align=center>11</td>
+	<td align=center>11/1/2000</td>
+	<td align=center>1.00</td>
+	<td align=left>err() on database handles fails with undefined reference.</td>
+	<td align=center>Fixed</td>
+	<td align=center>1.10</td>
+</tr></table>
+<a name="tips"></a>
+<h2>TIPS & TRICKS</h2><p>
+<ul>
+<li>Review the included "test.pl" for examples of using summaries, raw mode, DDL statements, and
+non-blocking multisession operations.</li>
+<li>Keep in mind that some DDL statements may return errors that are actually acceptable in 
+some cases, e.g., a "precautionary" DROP TABLE returning a 3807 error if the table doesn't exist.</li>
+<li>For optimal performance when bulkloading via non-blocking multisession mode, turn off 
+AutoCommit and explicitly commit() at periodic intervals.</li>
+<li>If you need to re-execute a previously prepared <b>and executed</b> data returning
+statement <b><i>before the returned rowset has been completely consumed</i></b>, you <b>must</b>
+use <code>sth-&gt;finish()</code> first. The O'Reilly DBI book indicates it isn't essential, 
+but DBD::Teradata currently needs it to cleanup and cancel the current request.</li>
+<li>Similarly, you can't execute new requests on a database handle that has a currently
+open and active request on it. Either finish() the current request first, or use an additional
+connection to issue the new request.</li>
+<li>DBD::Teradata is not yet thread-safe, though that should be addressed in the near
+future.</li>
+<li>Be careful about checking error status; Both <code>undef</code> and zero are
+interpretted as false, so statements which effect no rows may be interpretted as
+errors if you use the simple <code>$sth-&gt;execute || die $sth-&gt;errstr</code> check.
+Try <code>$sth-&gt;execute || die $sth-&gt;errstr</code> instead.</li>
+<li>Consider setting <b>both</b> <code>PrintError</code> and <code>RaiseError</code>
+to zero during <code>DBI-&gt;connect()</code>, and explicitly checking for errors
+yourself; otherwise, you may exit unexpectedly or get spurious error messages in the output
+when you're just doing a "precautionary" DROP on a non-existant database object.</li>
+
+</ul>
+<p>
+<a name="todo"></a>
+<h2>TO DO List</h2><p>
+
+<ul>
+<li>Make thread-safe
+<li>Add CANCEL support
+<li>Add fastload support
+<li>Add fastexport support
+<li>Add array-based bind_param/bind_col for better performance
+<li>Review for performance enhancements
+<li>Add BCD DECIMAL support
+</ul>
+<p>
+
+<a name="acks"></a>
+<h2>ACKNOWLEDGEMENTS</h2><p>
+
+Thanks to all the alpha testers whose patience and input
+were invaluable.
+
+<a name="refs"></a>
+<h2>REFERENCES</h2><p>
+
+<ul>
+<li><a href="http://www.symbolstone.org/technology/perl/DBI/">Official DBI Site</a>
+<li><a href="http://www.cpan.org">CPAN</a>
+<li><a href="http://www.perl.com">Perl.com</a>
+<li><a href="http://www.activestate.com">ActiveState</a> (for Perl software for Windows)
+<li><a href="http://www.info.ncr.com">Teradata Online Docs</a>
+</ul>
+
+<h2>AUTHOR</h2><p>
+
+<a href="mailto:darnold@earthlink.net">Dean Arnold</a><p>
+
+<a name="copy"></a>
+<h2>COPYRIGHT</h2><p>
+
+Copyright (c) 2000, Dean Arnold, USA<br>
+Affiliations:<br>
+<ul>
+<li><a href="http://www.baseline-consulting.com">Baseline Consulting</a>,<br>
+<li><a href="http://www.mylines.com">MyLines.com</a>,<br>
+<li><a href="http://home.earthlink.net/~darnold">Homepage</a>
+</ul><p>
+Permission is granted to use this software according to the terms of the
+<a href="http://www.gnu.org/copyleft/gpl.html">GNU General Public License</a>.
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 2
+of the License, or (at your option) any later version.<p>
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.<p>
+
+Please note that this license prohibits the incorporation of the source
+code of this product in publicly distributed, but proprietary products (e.g., something
+you're trying to sell, as opposed to selling support for). However, proprietary products
+may invoke DBD::Teradata library functions.<p>
+
+I'm offering the software <b>AS IS</b>, and <b>ACCEPT NO
+LIABILITY FOR ANY ERRORS OR OMMISSIONS IN, OR LOSSES INCURRED AS A
+RESULT OF USING DBD::Teradata.</B> If you delete your company's entire
+data warehouse while using this stuff, you're on your own!<p>
+I reserve the right to provide support for this software
+to individual sites under a separate (possibly fee-based)
+agreement.<p>
+
+Teradata&reg; is a registered trademark of NCR Corporation.<p>
+
+<center><h3>!!!!&nbsp;PLEASE BE ADVISED&nbsp;!!!!</h3></center>
+I am an independent software developer. I am <b><i>NOT</i></b> an NCR employee. DBD::Teradata was developed
+entirely independently of NCR. If you call Global Support about a
+DBD::Teradata problem, you're likely to get the bum's rush.<p>
+
+
+</body></html>
+

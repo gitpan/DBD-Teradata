@@ -1,0 +1,5 @@
+Revision history for Perl extension DBD::Teradata.
+
+1.10  Sun Nov 12 11:05:34 2000
+	- original CPAN version; created by h2xs 1.19
+

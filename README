@@ -1,0 +1,99 @@
+NAME
+    DBD::Teradata - a DBI driver for Teradata
+
+  *** *BEFORE* BUILDING, TESTING AND INSTALLING this you will need to:
+
+            Build, test and install Perl 5 (minimum version 5.005).
+            It is very important to TEST it and INSTALL it!
+
+            Build, test and install the DBI module (minimum version 1.13).
+            It is very important to TEST it and INSTALL it!
+
+            Remember to *read* the DBI README, this README, and the included
+            tdatdbd.html CAREFULLY! 
+        
+            I had a lot of info to distill, and POD, though quaint and
+            convenient for READMEs like this, just isn't as expressive
+            as HTML...hence tdatdbd.html. Please refer to tdatdbd.html for
+            detailed usage information.
+
+  *** BUILDING:
+
+            Define the following environment variables:
+            (These are used to logon the sessions for the test.pl script.)
+
+                    TDAT_DBD_DSN - set to your DBMS's hostname (e.g., 'dbccop1')
+                    TDAT_DBD_USER - set to the userid that has about 4 MBytes of 
+                            perm space and can create/drop tables and macros
+                    TDAT_DBD_PASSWORD - set to the password for aforementioned userid
+
+            For Windows 95/98/2000/ME/NT:
+            
+            Save us all a great deal of agony, and just copy Teradata.pm
+            to your site-specific lib\DBD directory (e.g., \perl\site\lib\DBD
+            for most ActiveState configurations) (backup your old copy if you're
+            upgrading!!!), and then copy test.pl somewhere and run
+            
+                    perl -w test.pl
+                    
+            and make sure you get all the way to the
+            "Tests completed ok, exitting..." output at the end.
+            
+            For non-Windows:
+            
+        perl Makefile.pl    # use a perl that's in your PATH
+        make
+        make test                   # will spew results to STDOUT, 
+                                            # messages to STDERR, 
+                                            # and create a tdrawtest.out file
+        make install (if the tests look okay)
+
+  *** IF YOU HAVE PROBLEMS:
+
+        Please read the tdatdbd.html file which includes important
+        information, including tips and workarounds for various
+        platform-specific problems.
+
+  *** SUPPORT INFORMATION:
+
+        For the latest DBD::Teradata information, please see
+
+            http://home.earthlink.net/~darnold/tdatdbd.html
+
+        Bug reports/Comments/suggestions/enhancement requests may be sent to
+
+            darnold@earthlink.net
+
+        Please see the following files for more information:
+            tdatdbd.html - the User's Guide
+
+  *** MAILING LISTS
+
+        As a user or maintainer of a local copy of DBD::Teradata, you need
+        to be aware of the following addresses:
+
+        The DBI mailing lists located at
+
+            dbi-announce@fugue.com          for announcements
+            dbi-dev@fugue.com               for developer/maintainer discussions
+            dbi-users@fugue.com             for end user level discussion and help
+
+        To subscribe or unsubscribe to each individual list you may use the
+        WWW at
+
+            http://www.fugue.com/dbi
+
+        or email at the following addresses
+
+            dbi-announce-request@fugue.com
+            dbi-dev-request@fugue.com
+            dbi-users-request@fugue.com
+
+        with your request in the body of the message.
+        
+        The Teradata mailing list is managed and archived at
+        
+            http://home.ease.lsoft.com/archives/tdata-l.html
+            
+        You should subscribe to this list for Teradata-specific help and info.
+    =cut
