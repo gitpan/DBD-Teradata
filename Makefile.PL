@@ -97,7 +97,7 @@ package MY;
 sub postamble {
     "\npm_to_blib: README\n" .
     "\nREADME: Teradata.pm" .
-    "\n\tperldoc Teradata.pm >README\n\n"
+    "\n\tperldoc -t Teradata.pm >README\n\n"
 }
 
 

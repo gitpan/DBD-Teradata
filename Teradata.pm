@@ -1,5 +1,5 @@
 #
-#   Copyright (c) 2000 Dean Arnold
+#   Copyright (c) 2000-2003, Dean Arnold
 #
 #   You may distribute under the terms of either the GNU General Public
 #   License or the Artistic License, as specified in the Perl README file,
@@ -2418,7 +2418,7 @@ sub clear_buf {
 package DBD::Teradata;
 
 use vars qw($VERSION $err $errstr $state $drh %connections);
-$VERSION = "1.12";
+$VERSION = "1.13";
 $drh = undef;
 %connections = ();
 $err = 0;
@@ -3870,16 +3870,20 @@ http://home.earthlink.net/~darnold/tdatdbd.html for detailed information.
 
     For the latest DBD::Teradata information, please see
 
-        http://home.earthlink.net/~darnold/tdatdbd.html
+        http://www.presicient.com/tdatdbd
 
     Bug reports/Comments/suggestions/enhancement requests may be sent to
 
-        darnold@earthlink.net
+        darnold@presicient.com
 
     Please see the following files for more information:
     	tdatdbd.html - the User's Guide
     	
 =head2 *** CHANGE HISTORY
+
+	Release 1.13	Apr 27, 2003
+	
+		- updated contact info
 
 	Release 1.12	Dec 10, 2000
 	
@@ -3906,23 +3910,14 @@ http://home.earthlink.net/~darnold/tdatdbd.html for detailed information.
 
     The DBI mailing lists located at
 
-        dbi-announce@fugue.com          for announcements
-        dbi-dev@fugue.com               for developer/maintainer discussions
-        dbi-users@fugue.com             for end user level discussion and help
+        dbi-announce@perl.org          for announcements
+        dbi-dev@perl.org 		for developer/maintainer discussions
+        dbi-users@perl.org 		for end user level discussion and help
 
-    To subscribe or unsubscribe to each individual list you may use the
-    WWW at
+    To subscribe or unsubscribe to each individual list refer to
 
-        http://www.fugue.com/dbi
+        http://dbi.perl.org
 
-    or email at the following addresses
-
-        dbi-announce-request@fugue.com
-        dbi-dev-request@fugue.com
-        dbi-users-request@fugue.com
-
-    with your request in the body of the message.
-    
     The Teradata mailing list is managed and archived at
     
     	http://home.ease.lsoft.com/archives/tdata-l.html

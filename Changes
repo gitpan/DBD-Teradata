@@ -1,5 +1,8 @@
 Revision history for Perl extension DBD::Teradata.
 
+1.13	Sun Apr 27 12:00:00 2000
+	- updated contact info
+
 1.12	Mon Dec 10  12:00:00 2000
 	- fixed datainfo problem on non-Intel platforms
 
