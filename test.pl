@@ -1,5 +1,6 @@
 use DBI;
 use DBI qw(:sql_types);
+use DBD::Teradata;
 use FileHandle;
 
 my $alphas = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_ ';
@@ -21,9 +22,16 @@ my %typestr = (
 
 my $dbh;
 
-my $dsn = $ENV{'TDAT_DBD_DSN'};
-my $userid = $ENV{'TDAT_DBD_USER'};
-my $passwd = $ENV{'TDAT_DBD_PASSWORD'};
+my ($dsn, $userid, $passwd);
+
+if (@ARGV) {
+	($dsn, $userid, $passwd) = @ARGV;
+}
+else {
+	$dsn = $ENV{'TDAT_DBD_DSN'};
+	$userid = $ENV{'TDAT_DBD_USER'};
+	$passwd = $ENV{'TDAT_DBD_PASSWORD'};
+}
 if (!defined($dsn)) {
 	die "No host defined...check TDAT_DBD_DSN environment variable\n";
 }
@@ -460,7 +468,7 @@ sub rawinput {
 	local $col10b = int(rand(99999));
 	local $col10 = $col10a . '.' . $col10b;
 	local $len = 2 + 4 + 2 + 1 + 20 + 2 + length($col5) + 8 + 1 + 2 + 4 + 8;
-	$rec = pack("Scc l s c A20 SA* d C S L d c", 
+	$rec = pack("SCC l s C A20 SA* d C S L d c", 
 		$len, $indic, 0, 
 		$inp, $inp%32767, $inp%255, rndstring(20),
 		length($col5), $col5, $col6, $col7, $col8, $col9, $col10, 10);

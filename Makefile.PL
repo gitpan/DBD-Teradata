@@ -1,19 +1,19 @@
 # -*- perl -*-
 
-require 5.005;
+require 5.006;
 use strict;
 use vars qw($DBI_INC_DIR);
 require ExtUtils::MakeMaker;
 
-eval { require 5.005 } or die << 'EOD';
+eval { require 5.006 } or die << 'EOD';
 #######################################
-#	This module requires a minimum Perl version of 5.005
+#	This module requires a minimum Perl version of 5.006
 #	Please upgrade!
 #######################################
 EOD
 
 print "\nConfiguring DBD::Teradata ...\n
->>>\tRemember to actually *READ* the README file!
+>>>\tRemember to *READ* the README file!
    \tAnd re-read it if you have any problems.\n
 ";
 
@@ -28,19 +28,39 @@ my %opts =
      );
 
 if ($ExtUtils::MakeMaker::VERSION >= 5.43) {
-    $opts{'AUTHOR'} = 'Dean Arnold (darnold@earthlink.net)';
+    $opts{'AUTHOR'} = 'Dean Arnold (darnold@presicient.com)';
     $opts{'ABSTRACT'} = 'Teradata driver for DBI module';
     $opts{'PREREQ_PM'} = \%prereq;
 }
 my $ok = 1;
 $ok &&= CheckModule('DBI', '1.13');
 
-if (!$ok) {
-    print("\n",
-	  "Missing modules are available from any CPAN mirror, for example\n",
-	  "\tftp://ftp.funet.fi/pub/languages/perl/CPAN/modules/by-module\n",
-	  "\n");
-}
+print "
+	Missing modules are available from any CPAN mirror, for example,
+	http://search.cpan.org
+
+"
+	unless $ok;
+
+print "
+Can't find current Crypt::Blowfish or Crypt::Blowfish_PP 
+	(required for V2R5.1 encryption support).
+	Missing modules are available from any CPAN mirror, for example,
+	http://search.cpan.org
+
+"
+	unless (CheckModule('Crypt::Blowfish', '2.09') ||
+		CheckModule('Crypt::Blowfish_PP', '1.12'));
+
+print "
+Can't find current Math::BigInt 
+	(required for V2R5.1 encryption support).
+	Missing modules are available from any CPAN mirror, for example,
+	http://search.cpan.org
+
+"
+	unless CheckModule('Math::BigInt', '1.60');
+
 
 &check_DBI();
 ExtUtils::MakeMaker::WriteMakefile(%opts);

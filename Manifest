@@ -1,9 +1,9 @@
-Changes
+Changes.txt
+LICENSE.txt
 Makefile.PL
-MANIFEST
+Manifest
 Teradata.pm
 test.pl
 tdatdbd.html
-Readme
 
 

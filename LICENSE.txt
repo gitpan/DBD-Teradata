@@ -1,0 +1,15 @@
+Permission is granted to use this software according to the terms of the
+Artistic License, as specified in the Perl README file,
+with the exception that commercial redistribution, either 
+electronic or via physical media, as either a standalone package, 
+or incorporated into a third party product, requires prior 
+written approval of the author.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+Presicient Corp. reserves the right to provide support for this software
+to individual sites under a separate (possibly fee-based)
+agreement.
+
