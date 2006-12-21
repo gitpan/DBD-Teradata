@@ -1,127 +1,171 @@
 # -*- perl -*-
 
-require 5.006;
+require 5.8.0;
 use strict;
 use vars qw($DBI_INC_DIR);
 require ExtUtils::MakeMaker;
 
-eval { require 5.006 } or die << 'EOD';
+eval { require 5.8.0 } or die << 'EOD';
 #######################################
-#	This module requires a minimum Perl version of 5.006
+#	This module requires a minimum Perl version of 5.8.0
 #	Please upgrade!
 #######################################
 EOD
 
-print "\nConfiguring DBD::Teradata ...\n
->>>\tRemember to *READ* the README file!
-   \tAnd re-read it if you have any problems.\n
+print "
+
+ *** Configuring DBD::Teradata (feature-limited free edition)...
+
 ";
 
-my %prereq;
-my %opts =
-    ('NAME' => 'DBD::Teradata',
-     'VERSION_FROM' => 'Teradata.pm',
-     'dist'         => { 
+my ($inc, $libs, $defines) = ('','','');
+
+if ($^O eq 'MSWin32') {
+#
+#	user must set the TDAT_DBD_CLI_LIB environment variable
+#	first time they install on windows (or on re-install)
+#	we'll default to common location
+#
+	$ENV{TDAT_DBD_CLI_LIB} = 'C:\\PROGRA~1\\NCR\\TERADA~1\\cli\\lib'
+		unless defined($ENV{TDAT_DBD_CLI_LIB});
+
+	$ENV{TDAT_DBD_CLI_INC} = 'C:\\PROGRA~1\\NCR\\TERADA~1\\cli\\inc'
+		unless defined($ENV{TDAT_DBD_CLI_INC});
+
+	$inc = '-I' . $ENV{TDAT_DBD_CLI_INC};
+	if ((-e "$ENV{SystemRoot}\\System32\\wincli32.dll") &&
+		(-e "$ENV{TDAT_DBD_CLI_LIB}\\wincli32.lib")) {
+		$libs .= "-L$ENV{TDAT_DBD_CLI_LIB} -lwincli32";
+#		print $libs, "\n";
+		foreach ('tdusr32', 'localisation', 'tdgss', 'terasso') {
+			$libs .= " -l$_"
+				if -e "$ENV{SystemRoot}\\System32\\$_.dll";
+		}
+	}
+}
+else {
+#
+#	how do we pick where the libs are installed ? for now assume /usr/lib
+#
+	my $libdir = $ENV{TDAT_DBD_CLI_LIB} ||= '/usr/lib';
+	$inc = '-I' . $ENV{TDAT_DBD_CLI_INC}
+		if defined($ENV{TDAT_DBD_CLI_INC});
+	$defines = '-D__error_t_defined=1';
+	if (-e "$libdir/libcliv2.so") {
+		$libs .= "-L$libdir -lcliv2 -lnet -lsocket -lresolv";
+
+		foreach ('tdusr', 'tdgss') {
+			$libs .= " -l$_.so"
+				if -e "$libdir/lib$_.so";
+		}
+	}
+}
+
+print "
+***************************************************************
+*
+*	!!!NOTE TO INSTALLERS!!!
+*
+*	DBD::Teradata will be built using the following
+*	directives:
+*	Libraries: $libs
+*	Include files: $inc
+*	Compile flags: $defines
+*
+*	If your CLI2 libraries and/or include files are in another
+*	location, please update the TDAT_DBD_CLI_LIB and
+*	TDAT_DBD_CLI_INC environment variables before running
+*	Makefile.PL.
+*
+***************************************************************
+
+";
+
+my %opts = (
+	'NAME' => 'DBD::Teradata',
+	'VERSION_FROM' => 'lib/DBD/Teradata.pm',
+	'dist'         => {
 	 	'DIST_DEFAULT' => 'all tardist',
      	'SUFFIX'       => 'gz',
-	 	'COMPRESS'     => 'gzip -9vf' }
-     );
+	 	'COMPRESS'     => 'gzip -9vf'
+	 },
 
-if ($ExtUtils::MakeMaker::VERSION >= 5.43) {
-    $opts{'AUTHOR'} = 'Dean Arnold (darnold@presicient.com)';
-    $opts{'ABSTRACT'} = 'Teradata driver for DBI module';
-    $opts{'PREREQ_PM'} = \%prereq;
-}
+    'AUTHOR' => 'Dean Arnold (darnold@presicient.com)',
+    'ABSTRACT' => 'Perl DBI driver for Teradata',
+    'PREREQ_PM' => {},
+    'LIBS' => $libs,
+    'INC' => $inc,
+    'CCFLAGS' => $defines
+);
+
+
 my $ok = 1;
-$ok &&= CheckModule('DBI', '1.13');
+my $failed = undef;
 
-print "
-	Missing modules are available from any CPAN mirror, for example,
-	http://search.cpan.org
+$ok = undef,
+$failed = 1
+	unless CheckModule('DBI', '1.40');
 
-"
+$ok = undef,
+print '
+
+	DECIMAL values will be converted via floating point arithmetic.
+	Math::BigInt may be installed for more accurate conversions.
+
+'
+	unless CheckModule('Math::BigInt', '1.73');
+
+print '
+
+	Missing modules are available from any CPAN mirror, e.g.,
+	http://search.cpan.org/
+
+'
 	unless $ok;
 
-print "
-Can't find current Crypt::Blowfish or Crypt::Blowfish_PP 
-	(required for V2R5.1 encryption support).
-	Missing modules are available from any CPAN mirror, for example,
-	http://search.cpan.org
-
-"
-	unless (CheckModule('Crypt::Blowfish', '2.09') ||
-		CheckModule('Crypt::Blowfish_PP', '1.12'));
-
-print "
-Can't find current Math::BigInt 
-	(required for V2R5.1 encryption support).
-	Missing modules are available from any CPAN mirror, for example,
-	http://search.cpan.org
-
-"
-	unless CheckModule('Math::BigInt', '1.60');
-
-
 &check_DBI();
+
+exit(0) if $failed;
+
 ExtUtils::MakeMaker::WriteMakefile(%opts);
 
 sub check_DBI {
-    my $dir;
     eval { require DBI::DBD };
-    foreach $dir (@INC) {
-        if (-f "$dir/auto/DBI/DBIXS.h") {
-  	    $DBI_INC_DIR = "-I$dir/auto/DBI";
-	    last;
-        }
-     }
-    if (!defined($DBI_INC_DIR)) {
-        print "Unable to locate auto/DBI/DBIXS.h in the following directories:\n";
-        print "\n";
-        foreach $dir (@INC) {
-    	    print "    $dir\n";
-        }
+    foreach (@INC) {
+  	    $DBI_INC_DIR = "-I$_/auto/DBI",
+	    last
+        	if -f "$_/auto/DBI/DBIXS.h";
+    }
+    unless (defined($DBI_INC_DIR)) {
+        print "Unable to locate auto/DBI/DBIXS.h in the following directories:\n\n";
+   	    print "    $_\n"
+        	foreach (@INC);
+
         print "\nDoesn't look like a correct DBI installation.\n";
         $ok = 0;
     }
-    if (!$ok) {
-        exit(0);
-    }
+	exit(0)
+    	unless $ok;
 }
 
 sub CheckModule ($$;$) {
     my($module, $version, $package) = @_;
     $package ||= $module;
-    $prereq{$module} = $version || 0;
     if ($version) {
 		print "Checking for $package, $version or later ... ";
 		eval "use $module $version";
-		if ($@) {
-		    print("\nYou don't have the $package package",
-			  " version $version or later, installed.\n");
-		    return 0;
-		}
-    } else {
+	    print "\nYou don't have the $package package version $version or later, installed.\n" and
+	    return 0
+			if $@;
+    }
+    else {
 		print "Checking for $package ... ";
 		eval "use $module";
-		if ($@) {
-		    print("\nYou don't have the $package package installed.\n");
-		    return 0;
-		}
+		print "\nYou don't have the $package package installed.\n" and
+		return 0
+			if $@;
     }
     print "ok\n";
     return 1;
 }
 
-package MY;
-
-sub postamble {
-    "\npm_to_blib: README\n" .
-    "\nREADME: Teradata.pm" .
-    "\n\tperldoc -t Teradata.pm >README\n\n"
-}
-
-
-sub libscan {
-    my($self, $path) = @_;
-    ($path =~ /\~$/) ? undef : $path;
-}

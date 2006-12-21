@@ -1,126 +1,112 @@
 NAME
-    DBD::Teradata - a DBI driver for Teradata
+    DBD::Teradata - DBI driver for Teradata
 
 SYNOPSIS
       use DBI;
 
       $dbh = DBI->connect('dbi:Teradata:hostname', 'user', 'password');
 
-    See the DBI manpage for more information.
+    See DBI for more information.
 
 DESCRIPTION
-    Refer to the included tdatdbd.html, or
-    http://home.earthlink.net/~darnold/tdatdbd.html for detailed
+    Refer to the included doc/index.html, or
+    <http://www.presicient.com/tdatdbd> for detailed information.
+
+  PREREQUISITES
+    Install Perl (minimum version 5.8).
+
+    Build, test and install the DBI module (minimum version 1.36).
+
+    Remember to *read* the DBI README, this README, and the included
+    doc/index.html CAREFULLY!
+
+    I had a lot of info to distill, and POD, though quaint and convenient
+    for READMEs like this, just isn't as expressive as HTML...hence
+    doc/index.html. Please refer to doc/index.html for detailed usage
     information.
 
-  *** *BEFORE* BUILDING, TESTING AND INSTALLING this you will need to:
-
-            Build, test and install Perl 5 (minimum version 5.005).
-            It is very important to TEST it and INSTALL it!
-
-            Build, test and install the DBI module (minimum version 1.13).
-            It is very important to TEST it and INSTALL it!
-
-            Remember to *read* the DBI README, this README, and the included
-            tdatdbd.html CAREFULLY! 
-    
-            I had a lot of info to distill, and POD, though quaint and
-            convenient for READMEs like this, just isn't as expressive
-            as HTML...hence tdatdbd.html. Please refer to tdatdbd.html for
-            detailed usage information.
-
   *** BUILDING:
+   NOTE
+    The provided test suite is not suitable for normal Perl "make test", as
+    it requires a Teradata database and a username and password for an
+    account with various privileges (e.g., CREATE PROCEDURE).
 
-            Define the following environment variables:
-            (These are used to logon the sessions for the test.pl script.)
+    After installing, you can verify the install by running
 
-                    TDAT_DBD_DSN - set to your DBMS's hostname (e.g., 'dbccop1')
-                    TDAT_DBD_USER - set to the userid that has about 4 MBytes of 
-                            perm space and can create/drop tables and macros
-                    TDAT_DBD_PASSWORD - set to the password for aforementioned userid
+            perl t/test.pl <host> <user> <password>
 
-            For Windows 95/98/2000/ME/NT:
-        
-            Save us all a great deal of agony, and just copy Teradata.pm
-            to your site-specific lib\DBD directory (e.g., \perl\site\lib\DBD
-            for most ActiveState configurations) (backup your old copy if you're
-            upgrading!!!), and then copy test.pl somewhere and run
-        
-                    perl -w test.pl
-                
-            and make sure you get all the way to the
-            "Tests completed ok, exitting..." output at the end.
-        
-            For non-Windows:
-        
+    where <host> is the name of your Teradata server. NOTE that CLI does NOT
+    support numeric IP addresses, nor addresses with the COPn suffix already
+    applied, i.e.,
+
+            perl t/test.pl 129.123.345.78 dbc dbc   # WRONG
+
+            perl t/test.pl DBCCOP1 dbc dbc          # WRONG
+
+            perl t/test.pl DBC dbc dbc              # RIGHT!
+
+   Building For Microsoft Windows
+    You'll need the nmake utility, available with the various Visual Studio
+    tools. You'll also need to make sure your command prompt is configured
+    to find nmake; see the Visual Studio documents for how to do that.
+
+    To build:
+
+        perl Makefile.pl    # use a perl that's in your PATH
+        nmake
+        nmake install
+
+   Building For UNIX/Linux
         perl Makefile.pl    # use a perl that's in your PATH
         make
-        make test                   # will spew results to STDOUT, 
-                                            # messages to STDERR, 
-                                            # and create a tdrawtest.out file
-        make install (if the tests look okay)
+        make install
 
-  *** IF YOU HAVE PROBLEMS:
+  IF YOU HAVE PROBLEMS
+    Please read the doc/index.html file which includes important
+    information, including tips and workarounds for various
+    platform-specific problems.
 
-        Please read the tdatdbd.html file which includes important
-        information, including tips and workarounds for various
-        platform-specific problems.
+  SUPPORT INFORMATION
+    For the latest DBD::Teradata information, please see
+    <http://www.presicient.com/tdatdbd.html>.
 
-  *** SUPPORT INFORMATION:
+    Bug reports/Comments/suggestions/enhancement requests may be sent to
+    <mailto:support@presicient.com>.
 
-        For the latest DBD::Teradata information, please see
+    Please note: This free version of DBD::Teradata is a minimal
+    implementation of the commercially supported version. Refer to
+    <http://www.presicient.com/tdatdbd> for details on the differences.
 
-            http://www.presicient.com/tdatdbd
+   MAILING LISTS
+    As a user or maintainer of a local copy of DBD::Teradata, you need to be
+    aware of the following addresses:
 
-        Bug reports/Comments/suggestions/enhancement requests may be sent to
-
-            darnold@presicient.com
-
-        Please see the following files for more information:
-            tdatdbd.html - the User's Guide
-        
-  *** CHANGE HISTORY
-
-            Release 1.13    Apr 27, 2003
-        
-                    - updated contact info
-
-            Release 1.12    Dec 10, 2000
-        
-                    - fixed datainfo problem on non-Intel platforms
-
-            Release 1.11    Dec 10, 2000
-        
-                    - added tdat_lsn, tdat_clone, tdat_keepresp, and tdat_utility attributes
-                    - added support for FASTLOAD, EXPORT, and MONITOR utility sessions
-                    - added bind_param_inout() function
-                    - added BindParamArray(), BindColArray(), and FirstAvailList() 
-                            driver-specific function
-                    - fixed sth->rows(), and improved dbh->do() behavior
-                    - improved error reporting on failed DBI->connect() calls
-
-            Release 1.10    Nov 12, 2000
-        
-                    - first official CPAN release
-
-  *** MAILING LISTS
-
-        As a user or maintainer of a local copy of DBD::Teradata, you need
-        to be aware of the following addresses:
-
-        The DBI mailing lists located at
+    The DBI mailing lists located at
 
             dbi-announce@perl.org          for announcements
-            dbi-dev@perl.org                for developer/maintainer discussions
-            dbi-users@perl.org              for end user level discussion and help
+            dbi-dev@perl.org               for developer/maintainer discussions
+            dbi-users@perl.org             for end user level discussion and help
 
-        To subscribe or unsubscribe to each individual list refer to
+    Refer to <http://dbi.perl.org/support/> for details on subscribing to
+    these lists.
 
-            http://dbi.perl.org
+  COPYRIGHT, AUTHOR, and LICENSE
+    Copyright(C) 2001-2007, Presicient Corporation, USA. All rights
+    reserved.
 
-        The Teradata mailing list is managed and archived at
-    
-            http://home.ease.lsoft.com/archives/tdata-l.html
-        
-        You should subscribe to this list for Teradata-specific help and info.
-    =cut
+    Permission is granted to use this software according to the terms of the
+    Perl Artistic License, as specified in the Perl README file, with the
+    exception that commercial redistribution, either electronic or via
+    physical media, as either a standalone package, or incorporated into a
+    third party product, requires prior written approval of the copyright
+    holder.
+
+    This software is distributed in the hope that it will be useful, but
+    WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+    Presicient Corp. reserves the right to provide support for this software
+    to individual sites under a separate (possibly fee-based) agreement.
+
+    Teradata(R) is a registed trademark of NCR Corporation.
+
