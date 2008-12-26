@@ -600,7 +600,7 @@ our %td_type_str2ddcodes = (
 );
 
 use vars qw($VERSION $drh);
-our $VERSION = '1.51';
+our $VERSION = '1.52';
 $drh = undef;
 my $installed = undef;
 use strict ;
@@ -4892,7 +4892,7 @@ our %EXPORT_TAGS = (
 );
 Exporter::export_tags(keys %EXPORT_TAGS);
 }
-our $VERSION = '1.51';
+our $VERSION = '1.52';
 use strict;
 use warnings;
 our %dbc_ctxts = ();
