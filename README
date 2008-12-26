@@ -10,7 +10,11 @@ SYNOPSIS
 
 DESCRIPTION
     Refer to the included doc/index.html, or
-    <http://www.presicient.com/tdatdbd> for detailed information.
+    http://www.presicient.com/tdatdbd for detailed information.
+    
+    NOTE: This version of the driver has been deprecated in favor of the
+    more complete and maintained GPL version available at
+    http://www.presicient.com/tdatdbd
 
   PREREQUISITES
     Install Perl (minimum version 5.8).
@@ -74,8 +78,8 @@ DESCRIPTION
     <mailto:support@presicient.com>.
 
     Please note: This free version of DBD::Teradata is a minimal
-    implementation of the commercially supported version. Refer to
-    <http://www.presicient.com/tdatdbd> for details on the differences.
+    implementation of the GPL version available at
+    <http://www.presicient.com/tdatdbd>.
 
    MAILING LISTS
     As a user or maintainer of a local copy of DBD::Teradata, you need to be
@@ -91,22 +95,15 @@ DESCRIPTION
     these lists.
 
   COPYRIGHT, AUTHOR, and LICENSE
-    Copyright(C) 2001-2007, Presicient Corporation, USA. All rights
+    Copyright(C) 2001-2009, Presicient Corporation, USA. All rights
     reserved.
 
     Permission is granted to use this software according to the terms of the
-    Perl Artistic License, as specified in the Perl README file, with the
-    exception that commercial redistribution, either electronic or via
-    physical media, as either a standalone package, or incorporated into a
-    third party product, requires prior written approval of the copyright
-    holder.
+    Perl Artistic License, as specified in the Perl README file.
 
     This software is distributed in the hope that it will be useful, but
     WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 
-    Presicient Corp. reserves the right to provide support for this software
-    to individual sites under a separate (possibly fee-based) agreement.
-
-    Teradata(R) is a registed trademark of NCR Corporation.
+    Teradata(R) is a registed trademark of Teradata Corporation.
 

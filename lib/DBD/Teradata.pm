@@ -600,7 +600,7 @@ our %td_type_str2ddcodes = (
 );
 
 use vars qw($VERSION $drh);
-our $VERSION = '1.50';
+our $VERSION = '1.51';
 $drh = undef;
 my $installed = undef;
 use strict ;
@@ -3970,6 +3970,9 @@ See L<DBI> for more information.
 Refer to the included doc/index.html, or
 L<http://www.presicient.com/tdatdbd> for detailed information.
 
+B<NOTE>: This version has been deprecated in favor of the more complete
+and maintained GPL version available at L<http://www.presicient.com/tdatdbd>.
+
 =head2 PREREQUISITES
 
 Install Perl (minimum version 5.8).
@@ -4889,7 +4892,7 @@ our %EXPORT_TAGS = (
 );
 Exporter::export_tags(keys %EXPORT_TAGS);
 }
-our $VERSION = '1.50';
+our $VERSION = '1.51';
 use strict;
 use warnings;
 our %dbc_ctxts = ();
